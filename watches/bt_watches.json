@@ -1,0 +1,170 @@
+[
+  {
+    "type": "group",
+    "id": "g1",
+    "label": "Banjo & Kazooie",
+    "group_id": null,
+    "collapsed": false
+  },
+  {
+    "type": "watch",
+    "label": "X Pos",
+    "addr_expr": "[0x80135490+4*[0x801354DC]]+0x724",
+    "dtype": "f32",
+    "display_hex": false,
+    "frozen": false,
+    "freeze_val": 0,
+    "group_id": "g1",
+    "description": ""
+  },
+  {
+    "type": "watch",
+    "label": "Y Pos",
+    "addr_expr": "[0x80135490+4*[0x801354DC]]+0x728",
+    "dtype": "f32",
+    "display_hex": false,
+    "frozen": false,
+    "freeze_val": 0,
+    "group_id": "g1",
+    "description": ""
+  },
+  {
+    "type": "watch",
+    "label": "Z Pos",
+    "addr_expr": "[0x80135490+4*[0x801354DC]]+0x72C",
+    "dtype": "f32",
+    "display_hex": false,
+    "frozen": false,
+    "freeze_val": 0,
+    "group_id": "g1",
+    "description": ""
+  },
+  {
+    "type": "watch",
+    "label": "Facing Angle",
+    "addr_expr": "[0x80135490+4*[0x801354DC]]+0xC08",
+    "dtype": "f32",
+    "display_hex": false,
+    "frozen": false,
+    "freeze_val": 0,
+    "group_id": "g1",
+    "description": ""
+  },
+  {
+    "type": "watch",
+    "label": "X Velocity",
+    "addr_expr": "[0x80135490+4*[0x801354DC]]+0xA0C",
+    "dtype": "f32",
+    "display_hex": false,
+    "frozen": false,
+    "freeze_val": 0,
+    "group_id": "g1",
+    "description": ""
+  },
+  {
+    "type": "watch",
+    "label": "Y Velocity",
+    "addr_expr": "[0x80135490+4*[0x801354DC]]+0xA10",
+    "dtype": "f32",
+    "display_hex": false,
+    "frozen": false,
+    "freeze_val": 0,
+    "group_id": "g1",
+    "description": ""
+  },
+  {
+    "type": "watch",
+    "label": "Z Velocity",
+    "addr_expr": "[0x80135490+4*[0x801354DC]]+0xA14",
+    "dtype": "f32",
+    "display_hex": false,
+    "frozen": false,
+    "freeze_val": 0,
+    "group_id": "g1",
+    "description": ""
+  },
+  {
+    "type": "watch",
+    "label": "Linear Velocity",
+    "addr_expr": "[0x80135490+4*[0x801354DC]]+0xA38",
+    "dtype": "f32",
+    "display_hex": false,
+    "frozen": false,
+    "freeze_val": 0,
+    "group_id": "g1",
+    "description": ""
+  },
+  {
+    "type": "watch",
+    "label": "Health",
+    "addr_expr": "0x8011B644",
+    "dtype": "u8",
+    "display_hex": false,
+    "frozen": false,
+    "freeze_val": 0,
+    "group_id": "g1",
+    "description": ""
+  },
+  {
+    "type": "group",
+    "id": "g2",
+    "label": "Misc",
+    "group_id": null,
+    "collapsed": false
+  },
+  {
+    "type": "watch",
+    "label": "Map to Load",
+    "addr_expr": "0x80127640",
+    "dtype": "u16",
+    "display_hex": true,
+    "frozen": false,
+    "freeze_val": 5,
+    "group_id": "g2",
+    "description": ""
+  },
+  {
+    "type": "watch",
+    "label": "Map Load Trigger",
+    "addr_expr": "0x80127642",
+    "dtype": "u8",
+    "display_hex": false,
+    "frozen": false,
+    "freeze_val": 1,
+    "group_id": "g2",
+    "description": ""
+  },
+  {
+    "type": "watch",
+    "label": "Entrance To Load In Map",
+    "addr_expr": "0x80127643",
+    "dtype": "u8",
+    "display_hex": false,
+    "frozen": false,
+    "freeze_val": 1,
+    "group_id": "g2",
+    "description": ""
+  },
+  {
+    "type": "watch",
+    "label": "Learned Moves Bitfield",
+    "addr_expr": "0x801912A8",
+    "dtype": "s64",
+    "display_hex": false,
+    "frozen": false,
+    "freeze_val": 18446744073709551615,
+    "group_id": "g2",
+    "description": "Set to -1 to learn all moves"
+  },
+  {
+    "type": "watch",
+    "label": "Next Character",
+    "addr_expr": "0x8012704C",
+    "dtype": "u8",
+    "display_hex": false,
+    "frozen": false,
+    "freeze_val": 2,
+    "group_id": "g2",
+    "description": "Freeze the value to one of the below then load a new map:\n0 = Unknown\n1 = \"Banjo-Kazooie\", -- Doesn't matter if you're Dragon Kazooie\n2 = \"Snowball\",\n3 = Unknown\n4 = \"Cutscene\", -- Cutscene happening in another map to activation point\n5 = Unknown\n6 = \"Bee\",\n7 = \"Washing Machine\",\n8 = \"Stony\",\n9 = \"Breegull Blaster\",\n10 = \"Banjo\",\n11 = \"Kazooie\", -- Doesn't matter if you're Dragon Kazooie\n12 = \"Submarine\",\n13 = \"Mumbo\",\n14 = \"Golden Goliath\",\n15 = \"Detonator\",\n16 = \"Van\",\n17 = \"Clockwork Kazooie\",\n18 = \"Small T-Rex\",\n19 = \"Big T-Rex\","
+  }
+]

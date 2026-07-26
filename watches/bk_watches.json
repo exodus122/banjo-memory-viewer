@@ -1,0 +1,250 @@
+[
+  {
+    "type": "group",
+    "id": "g1",
+    "label": "Banjo",
+    "group_id": null,
+    "collapsed": false
+  },
+  {
+    "type": "watch",
+    "label": "X Pos",
+    "addr_expr": "0x8037C5A0",
+    "dtype": "f32",
+    "display_hex": false,
+    "frozen": false,
+    "freeze_val": 0,
+    "group_id": "g1",
+    "description": ""
+  },
+  {
+    "type": "watch",
+    "label": "Y Pos",
+    "addr_expr": "0x8037C5A4",
+    "dtype": "f32",
+    "display_hex": false,
+    "frozen": false,
+    "freeze_val": 0,
+    "group_id": "g1",
+    "description": ""
+  },
+  {
+    "type": "watch",
+    "label": "Z Pos",
+    "addr_expr": "0x8037C5A8",
+    "dtype": "f32",
+    "display_hex": false,
+    "frozen": false,
+    "freeze_val": 0,
+    "group_id": "g1",
+    "description": ""
+  },
+  {
+    "type": "watch",
+    "label": "Facing Angle",
+    "addr_expr": "0x8037C690",
+    "dtype": "f32",
+    "display_hex": false,
+    "frozen": false,
+    "freeze_val": 0,
+    "group_id": "g1",
+    "description": ""
+  },
+  {
+    "type": "watch",
+    "label": "X Velocity",
+    "addr_expr": "0x8037C4B8",
+    "dtype": "f32",
+    "display_hex": false,
+    "frozen": false,
+    "freeze_val": 0,
+    "group_id": "g1",
+    "description": ""
+  },
+  {
+    "type": "watch",
+    "label": "Y Velocity",
+    "addr_expr": "0x8037C4BC",
+    "dtype": "f32",
+    "display_hex": false,
+    "frozen": false,
+    "freeze_val": 3212836864,
+    "group_id": "g1",
+    "description": ""
+  },
+  {
+    "type": "watch",
+    "label": "Z Velocity",
+    "addr_expr": "0x8037C4C0",
+    "dtype": "f32",
+    "display_hex": false,
+    "frozen": false,
+    "freeze_val": 0,
+    "group_id": "g1",
+    "description": ""
+  },
+  {
+    "type": "watch",
+    "label": "Linear Velocity",
+    "addr_expr": "0x8037C4F0",
+    "dtype": "f32",
+    "display_hex": false,
+    "frozen": false,
+    "freeze_val": 0,
+    "group_id": "g1",
+    "description": ""
+  },
+  {
+    "type": "watch",
+    "label": "Gravity",
+    "addr_expr": "0x8037C4E8",
+    "dtype": "f32",
+    "display_hex": false,
+    "frozen": false,
+    "freeze_val": 3307782144,
+    "group_id": "g1",
+    "description": ""
+  },
+  {
+    "type": "group",
+    "id": "g3",
+    "label": "Camera",
+    "group_id": null,
+    "collapsed": false
+  },
+  {
+    "type": "watch",
+    "label": "X Rotation",
+    "addr_expr": "0x8037D968",
+    "dtype": "f32",
+    "display_hex": false,
+    "frozen": false,
+    "freeze_val": 0,
+    "group_id": "g3",
+    "description": ""
+  },
+  {
+    "type": "watch",
+    "label": "Y Rotation",
+    "addr_expr": "0x8037D96C",
+    "dtype": "f32",
+    "display_hex": false,
+    "frozen": false,
+    "freeze_val": 0,
+    "group_id": "g3",
+    "description": ""
+  },
+  {
+    "type": "group",
+    "id": "g4",
+    "label": "Misc",
+    "group_id": null,
+    "collapsed": false
+  },
+  {
+    "type": "watch",
+    "label": "Map To Load",
+    "addr_expr": "0x8037E8F5",
+    "dtype": "u8",
+    "display_hex": false,
+    "frozen": false,
+    "freeze_val": 1,
+    "group_id": "g4",
+    "description": ""
+  },
+  {
+    "type": "watch",
+    "label": "Warp Activator",
+    "addr_expr": "0x8037E8F4",
+    "dtype": "u8",
+    "display_hex": false,
+    "frozen": false,
+    "freeze_val": 1,
+    "group_id": "g4",
+    "description": ""
+  },
+  {
+    "type": "watch",
+    "label": "Exit",
+    "addr_expr": "0x8037E8F6",
+    "dtype": "u8",
+    "display_hex": false,
+    "frozen": false,
+    "freeze_val": 0,
+    "group_id": "g4",
+    "description": ""
+  },
+  {
+    "type": "watch",
+    "label": "Learned Moves Bitfield",
+    "addr_expr": "0x8037C3A0",
+    "dtype": "s32",
+    "display_hex": false,
+    "frozen": false,
+    "freeze_val": 1048575,
+    "group_id": "g4",
+    "description": ""
+  },
+  {
+    "type": "group",
+    "id": "g5",
+    "label": "Clip Testing",
+    "group_id": null,
+    "collapsed": false
+  },
+  {
+    "type": "watch",
+    "label": "Wall Detection Height",
+    "addr_expr": "0x8037C1F8",
+    "dtype": "f32",
+    "display_hex": false,
+    "frozen": false,
+    "freeze_val": 0,
+    "group_id": "g5",
+    "description": ""
+  },
+  {
+    "type": "watch",
+    "label": "Wall Detection Radius",
+    "addr_expr": "0x8037C1FC",
+    "dtype": "f32",
+    "display_hex": false,
+    "frozen": false,
+    "freeze_val": 0,
+    "group_id": "g5",
+    "description": ""
+  },
+  {
+    "type": "watch",
+    "label": "X Pos Delta",
+    "addr_expr": "0x8037C4D8",
+    "dtype": "f32",
+    "display_hex": false,
+    "frozen": false,
+    "freeze_val": 0,
+    "group_id": "g5",
+    "description": ""
+  },
+  {
+    "type": "watch",
+    "label": "Y Pos Delta",
+    "addr_expr": "0x8037C4DC",
+    "dtype": "f32",
+    "display_hex": false,
+    "frozen": false,
+    "freeze_val": 0,
+    "group_id": "g5",
+    "description": ""
+  },
+  {
+    "type": "watch",
+    "label": "Z Pos Delta",
+    "addr_expr": "0x8037C4E0",
+    "dtype": "u8",
+    "display_hex": false,
+    "frozen": false,
+    "freeze_val": 0,
+    "group_id": "g5",
+    "description": ""
+  }
+]

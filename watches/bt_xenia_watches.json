@@ -1,0 +1,137 @@
+[
+  {
+    "type": "group",
+    "id": "g1",
+    "label": "Banjo & Kazooie",
+    "group_id": null,
+    "collapsed": false
+  },
+  {
+    "type": "watch",
+    "label": "Object Start",
+    "addr_expr": "[0x1826A29A0]+0x100000000",
+    "dtype": "u8",
+    "display_hex": false,
+    "frozen": false,
+    "freeze_val": 0,
+    "group_id": "g1",
+    "description": ""
+  },
+  {
+    "type": "watch",
+    "label": "X Pos",
+    "addr_expr": "[0x1826A29A0]+0x100000000+0x748",
+    "dtype": "f32",
+    "display_hex": false,
+    "frozen": false,
+    "freeze_val": 0,
+    "group_id": "g1",
+    "description": ""
+  },
+  {
+    "type": "watch",
+    "label": "Y Pos",
+    "addr_expr": "[0x1826A29A0]+0x100000000+0x74C",
+    "dtype": "f32",
+    "display_hex": false,
+    "frozen": false,
+    "freeze_val": 0,
+    "group_id": "g1",
+    "description": ""
+  },
+  {
+    "type": "watch",
+    "label": "Z Pos",
+    "addr_expr": "[0x1826A29A0]+0x100000000+0x750",
+    "dtype": "f32",
+    "display_hex": false,
+    "frozen": false,
+    "freeze_val": 0,
+    "group_id": "g1",
+    "description": ""
+  },
+  {
+    "type": "watch",
+    "label": "Facing Angle",
+    "addr_expr": "[0x1826A29A0]+0x100000000+0xC20",
+    "dtype": "f32",
+    "display_hex": false,
+    "frozen": false,
+    "freeze_val": 0,
+    "group_id": "g1",
+    "description": ""
+  },
+  {
+    "type": "watch",
+    "label": "X Velocity",
+    "addr_expr": "[0x1826A29A0]+0x100000000+0xA24",
+    "dtype": "f32",
+    "display_hex": false,
+    "frozen": false,
+    "freeze_val": 0,
+    "group_id": "g1",
+    "description": ""
+  },
+  {
+    "type": "watch",
+    "label": "Y Velocity",
+    "addr_expr": "[0x1826A29A0]+0x100000000+0xA28",
+    "dtype": "f32",
+    "display_hex": false,
+    "frozen": false,
+    "freeze_val": 1156415488,
+    "group_id": "g1",
+    "description": ""
+  },
+  {
+    "type": "watch",
+    "label": "Z Velocity",
+    "addr_expr": "[0x1826A29A0]+0x100000000+0xA2C",
+    "dtype": "f32",
+    "display_hex": false,
+    "frozen": false,
+    "freeze_val": 0,
+    "group_id": "g1",
+    "description": ""
+  },
+  {
+    "type": "watch",
+    "label": "Linear Velocity",
+    "addr_expr": "[0x1826A29A0]+0x100000000+0xA50",
+    "dtype": "f32",
+    "display_hex": false,
+    "frozen": false,
+    "freeze_val": 0,
+    "group_id": "g1",
+    "description": ""
+  },
+  {
+    "type": "watch",
+    "label": "Health",
+    "addr_expr": "0x18262DCD4",
+    "dtype": "u8",
+    "display_hex": false,
+    "frozen": false,
+    "freeze_val": 5,
+    "group_id": "g1",
+    "description": ""
+  },
+  {
+    "type": "group",
+    "id": "g2",
+    "label": "Misc",
+    "group_id": null,
+    "collapsed": false
+  },
+  {
+    "type": "watch",
+    "label": "Heap Start",
+    "addr_expr": "0x100070000",
+    "dtype": "u32",
+    "display_hex": true,
+    "frozen": false,
+    "freeze_val": 0,
+    "group_id": "g2",
+    "description": ""
+  }
+]

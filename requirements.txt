@@ -1,0 +1,10 @@
+# Banjo Memory Viewer - Python dependencies
+# Install with: pip install -r requirements.txt
+#
+# pywin32 is required to read BizHawk's/Xenia's process memory. The app is
+# Windows-only.
+
+pywin32>=306; sys_platform == "win32"
+
+# tkinter is included with the Python standard library.
+# If missing on Linux: sudo apt install python3-tk
