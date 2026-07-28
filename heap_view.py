@@ -214,6 +214,12 @@ class HeapView(tk.Frame):
     _DYNAMIC_TYPES = frozenset({"asset", "ParticleEmitter", "ParticleEmitter *", "unknown",
                                  "ActorArray", "Player Object"})
 
+    # Heap bar zoom (mouse wheel over the bar): multiplicative zoom per
+    # wheel notch, and the deepest allowed zoom expressed as a fraction of
+    # the full heap range (so you can never zoom in past ~1% of the heap).
+    _BAR_ZOOM_STEP      = 1.25
+    _BAR_MIN_VIEW_FRAC  = 0.01
+
     def __init__(self, parent, **kw):
         super().__init__(parent, bg=C_BG, **kw)
         self._blocks  = []
@@ -253,6 +259,17 @@ class HeapView(tk.Frame):
         self._bar_tooltip       = None   # Toplevel, created lazily
         self._bar_tooltip_label = None
         self._bar_last_xy       = None   # last mouse (x, y) over the bar, or None
+
+        # Heap bar zoom window, as a fraction (0.0-1.0) of the full heap
+        # range. (0.0, 1.0) = fully zoomed out - the whole heap visible,
+        # same as before this was zoomable. Updated by scrolling over the
+        # bar; _bar_view_start/_bar_view_size (actual addr/byte-count, not
+        # fractions) are recomputed each _redraw_bar() call so the wheel
+        # handler can convert pixel <-> address without redoing that math.
+        self._bar_view_start_frac = 0.0
+        self._bar_view_end_frac   = 1.0
+        self._bar_view_start = None
+        self._bar_view_size  = None
 
         self.asset_enum_names = self.load_asset_enum_names(resource_path("enums.h"))
         self.asset_enum_names_bt = {}
@@ -295,6 +312,10 @@ class HeapView(tk.Frame):
         self._bar_hover_addr = None
         self._bar_hover_item = None
         self._hide_bar_tooltip()
+        # Different game = different heap range entirely - don't carry a
+        # zoom window computed against the old profile's heap over to this one.
+        self._bar_view_start_frac = 0.0
+        self._bar_view_end_frac   = 1.0
         self._summary_var.set("")
         self._title_label.configure(text=f"HEAP VIEWER  —  {profile.name}")
 
@@ -321,6 +342,15 @@ class HeapView(tk.Frame):
         self._canvas.bind("<Motion>",    self._on_bar_motion)
         self._canvas.bind("<Leave>",     self._on_bar_leave)
         self._canvas.bind("<Button-1>",  self._on_bar_click)
+        # Zoom in/out on the heap bar, centred on the cursor. <MouseWheel>
+        # covers Windows/macOS; <Button-4>/<Button-5> cover X11, which sends
+        # wheel motion as ordinary button clicks instead of a delta.
+        self._canvas.bind("<MouseWheel>", self._on_bar_wheel)
+        self._canvas.bind("<Button-4>",   self._on_bar_wheel)
+        self._canvas.bind("<Button-5>",   self._on_bar_wheel)
+        # Double-click resets the zoom back to the whole heap - otherwise
+        # there'd be no quick way back out once zoomed in deep.
+        self._canvas.bind("<Double-Button-1>", self._on_bar_reset_zoom)
 
         # Toolbar
         tb = tk.Frame(self, bg=C_PANEL)
@@ -657,10 +687,26 @@ class HeapView(tk.Frame):
             heap_size  = self._blocks[-1]["end_addr"] + 1 - heap_start
         if not heap_size:
             return
-        scale = W / heap_size
+
+        # Apply the current zoom window (see _on_bar_wheel). Defaults to
+        # (0.0, 1.0) - the whole heap - identical to the pre-zoom behaviour.
+        view_start = heap_start + heap_size * self._bar_view_start_frac
+        view_size  = heap_size * (self._bar_view_end_frac - self._bar_view_start_frac)
+        if view_size <= 0:
+            view_size = heap_size
+        view_end = view_start + view_size
+        # Cached so _on_bar_wheel can convert pixel <-> address without
+        # redoing this calculation itself.
+        self._bar_view_start = view_start
+        self._bar_view_size  = view_size
+
+        scale = W / view_size
         for b in self._blocks:
-            x0 = int((b["addr"]         - heap_start) * scale)
-            x1 = int((b["end_addr"] + 1 - heap_start) * scale)
+            # Skip blocks entirely outside the current zoom window.
+            if b["end_addr"] < view_start or b["addr"] > view_end:
+                continue
+            x0 = int((b["addr"]         - view_start) * scale)
+            x1 = int((b["end_addr"] + 1 - view_start) * scale)
             x1 = max(x1, x0 + 1)
             # A thin outline in the panel's own background colour visually
             # separates adjacent blocks without needing extra canvas items.
@@ -668,12 +714,31 @@ class HeapView(tk.Frame):
                                fill=state_color(b["state"]), outline=C_PANEL, width=1)
             self._bar_segments.append((x0, x1, b))
 
+        self._draw_zoom_indicators(c, W, H)
+
         # If the mouse is already sitting over the bar (e.g. this redraw was
         # just a periodic data refresh, not the user moving the mouse),
         # reapply the hover highlight/tooltip instead of leaving them stale
         # or missing until the next actual mouse movement.
         if self._bar_last_xy is not None:
             self._apply_bar_hover(*self._bar_last_xy)
+
+    def _draw_zoom_indicators(self, c, W, H):
+        """When zoomed in, draw a small arrow at whichever edge(s) still
+        have heap content scrolled off-screen, so it's obvious the bar
+        isn't showing the entire heap right now."""
+        zoomed_left  = self._bar_view_start_frac > 1e-9
+        zoomed_right = self._bar_view_end_frac   < 1 - 1e-9
+        if not zoomed_left and not zoomed_right:
+            return
+        mid_y   = H / 2
+        arrow_h = min(H, 10)
+        if zoomed_left:
+            c.create_polygon(2, mid_y, 9, mid_y - arrow_h / 2, 9, mid_y + arrow_h / 2,
+                              fill="#FFFFFF", outline="")
+        if zoomed_right:
+            c.create_polygon(W - 2, mid_y, W - 9, mid_y - arrow_h / 2, W - 9, mid_y + arrow_h / 2,
+                              fill="#FFFFFF", outline="")
 
     # ── Heap bar hover / click ──────────────────────────────────────────────
 
@@ -732,6 +797,57 @@ class HeapView(tk.Frame):
         _, _, b = seg
         self.go_to_address(b["addr"])
 
+    def _on_bar_wheel(self, event):
+        """Zoom the heap bar in/out, centred on whatever address is under
+        the cursor right now, so the thing you're scrolling over is the
+        thing that stays put on screen as the view scales around it."""
+        W = self._canvas.winfo_width()
+        if not W or self._bar_view_start is None or self._bar_view_size is None:
+            return
+
+        # X11 sends wheel motion as Button-4 (up/zoom-in) or Button-5
+        # (down/zoom-out) clicks with no delta; Windows/macOS report a
+        # signed <MouseWheel> delta instead (positive = zoom in).
+        num = getattr(event, "num", None)
+        if num == 4:
+            zoom_in = True
+        elif num == 5:
+            zoom_in = False
+        else:
+            zoom_in = event.delta > 0
+
+        heap_start = self._profile.heap_start if self._profile else HEAP_START
+        heap_size  = self._profile.heap_size  if self._profile else HEAP_SIZE
+        if not heap_size and self._blocks:
+            heap_start = self._blocks[0]["addr"]
+            heap_size  = self._blocks[-1]["end_addr"] + 1 - heap_start
+        if not heap_size:
+            return
+
+        # Address currently under the cursor, in the *pre-zoom* view - this
+        # is what should still be under the cursor after rescaling.
+        frac_at_cursor = min(max(event.x / W, 0.0), 1.0)
+        anchor_addr = self._bar_view_start + frac_at_cursor * self._bar_view_size
+
+        new_size = (self._bar_view_size / self._BAR_ZOOM_STEP if zoom_in
+                    else self._bar_view_size * self._BAR_ZOOM_STEP)
+        min_size = heap_size * self._BAR_MIN_VIEW_FRAC
+        new_size = max(min_size, min(new_size, heap_size))
+
+        new_start = anchor_addr - frac_at_cursor * new_size
+        new_start = max(heap_start, min(new_start, heap_start + heap_size - new_size))
+
+        self._bar_view_start_frac = (new_start - heap_start) / heap_size
+        self._bar_view_end_frac   = (new_start + new_size - heap_start) / heap_size
+
+        self._bar_last_xy = (event.x, event.y)
+        self._redraw_bar()
+
+    def _on_bar_reset_zoom(self, _=None):
+        self._bar_view_start_frac = 0.0
+        self._bar_view_end_frac   = 1.0
+        self._redraw_bar()
+
     def _ensure_bar_tooltip(self):
         if self._bar_tooltip is not None:
             return
@@ -755,7 +871,7 @@ class HeapView(tk.Frame):
         size = b["chunk_size"]
         lines = [
             f"{_STATE_NAME.get(b['state'], 'UNK')}   "
-            f"0x{b['addr']:08X} – 0x{b['end_addr']:08X}  ({size} bytes)",
+            f"0x{b['addr']:08X} – 0x{b['end_addr']:08X}  (0x{size:X} bytes)",
             btype + (f"  {blabel}" if blabel else ""),
         ]
         if bsource:
@@ -765,10 +881,35 @@ class HeapView(tk.Frame):
     def _move_bar_tooltip(self, x, y):
         if self._bar_tooltip is None:
             return
-        root_x = self._canvas.winfo_rootx() + x + 14
-        root_y = self._canvas.winfo_rooty() + y + 20
-        self._bar_tooltip.geometry(f"+{root_x}+{root_y}")
-        self._bar_tooltip.deiconify()
+        tw = self._bar_tooltip
+        # Make sure reqwidth/reqheight reflect the current label text before
+        # using them below - they can be stale from a previous (differently
+        # sized) tooltip otherwise.
+        tw.update_idletasks()
+        tw_w = tw.winfo_reqwidth()
+        tw_h = tw.winfo_reqheight()
+
+        cursor_x = self._canvas.winfo_rootx() + x
+        cursor_y = self._canvas.winfo_rooty() + y
+        screen_w = tw.winfo_screenwidth()
+        screen_h = tw.winfo_screenheight()
+
+        # Prefer right/below the cursor, but flip to the opposite side
+        # whenever that would push the tooltip off the edge of the screen.
+        if cursor_x + 14 + tw_w > screen_w:
+            final_x = cursor_x - 14 - tw_w
+        else:
+            final_x = cursor_x + 14
+        if cursor_y + 20 + tw_h > screen_h:
+            final_y = cursor_y - 20 - tw_h
+        else:
+            final_y = cursor_y + 20
+
+        final_x = max(0, min(final_x, screen_w - tw_w))
+        final_y = max(0, min(final_y, screen_h - tw_h))
+
+        tw.geometry(f"+{final_x}+{final_y}")
+        tw.deiconify()
 
     def _hide_bar_tooltip(self):
         if self._bar_tooltip is not None:
