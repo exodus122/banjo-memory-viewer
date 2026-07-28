@@ -78,7 +78,7 @@ class TrainerApp:
         bar.pack(fill=tk.X, side=tk.TOP)
         bar.pack_propagate(False)
 
-        tk.Label(bar, text="🐻  Banjo Memory Viewer",
+        tk.Label(bar, text="Banjo Memory Viewer",
                  font=("Courier New", 13, "bold"),
                  fg=C_GREEN, bg=C_PANEL).pack(side=tk.LEFT, padx=12, pady=8)
 
@@ -270,6 +270,14 @@ class TrainerApp:
         else:
             self._connected = False
             self._set_status("Disconnected", C_RED)
+            self._show_no_game_detected()
+
+    def _show_no_game_detected(self):
+        """Reset the title bar to a neutral "nothing found" state. Without
+        this, it keeps showing the default profile (Banjo-Kazooie / BizHawk
+        N64) even when no emulator was actually found, which reads as if
+        it's genuinely connected to that."""
+        self._rom_label.configure(text="No emulator detected")
 
     def _set_status(self, text, color):
         self._status_dot.configure(fg=color)
@@ -332,6 +340,7 @@ class TrainerApp:
             self._connected = False
             self._set_status("Disconnected", C_RED)
             self._heap_view.set_no_data("Emulator disconnected")
+            self._show_no_game_detected()
             return False
 
         # Xenia profiles have no scan_signatures — just verify Xenia is still alive.

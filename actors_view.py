@@ -462,8 +462,6 @@ class ActorsView(tk.Frame):
         self._last_iid_order = []
         self._last_fp = ()
         self._clear()
-        name = getattr(profile, "name", "")
-        self._title_label.configure(text=f"ACTOR VIEWER  —  {name}")
         self._update_addr_hint()
 
     def set_array_addr(self, addr):
@@ -734,11 +732,9 @@ class ActorsView(tk.Frame):
         # ── Header ────────────────────────────────────────────────────────────
         hdr = tk.Frame(self, bg=C_BG)
         hdr.pack(fill=tk.X, padx=8, pady=(8, 4))
-        title = tk.Label(hdr, text="ACTOR VIEWER  —",
-                         font=("Courier New", 11, "bold"),
-                         fg=C_HEADER, bg=C_BG)
-        title.pack(side=tk.LEFT)
-        self._title_label = title
+        tk.Label(hdr, text="ACTOR VIEWER",
+                 font=("Courier New", 11, "bold"),
+                 fg=C_HEADER, bg=C_BG).pack(side=tk.LEFT)
 
         self._summary_var = tk.StringVar(value="")
         tk.Label(hdr, textvariable=self._summary_var,

@@ -271,6 +271,11 @@ class HeapView(tk.Frame):
         self._bar_view_start = None
         self._bar_view_size  = None
 
+        # Right-click-drag panning, active only while dragging - keeps the
+        # zoom span fixed and just slides the window left/right within it.
+        self._bar_pan_start_x          = None   # cursor x (canvas-local) when drag began
+        self._bar_pan_start_view_start = None   # view_start (bytes) when drag began
+
         self.asset_enum_names = self.load_asset_enum_names(resource_path("enums.h"))
         self.asset_enum_names_bt = {}
         self._build_ui()
@@ -316,8 +321,9 @@ class HeapView(tk.Frame):
         # zoom window computed against the old profile's heap over to this one.
         self._bar_view_start_frac = 0.0
         self._bar_view_end_frac   = 1.0
+        self._bar_pan_start_x = None
+        self._bar_pan_start_view_start = None
         self._summary_var.set("")
-        self._title_label.configure(text=f"HEAP VIEWER  —  {profile.name}")
 
     # ── Build UI ──────────────────────────────────────────────────────────────
 
@@ -325,11 +331,9 @@ class HeapView(tk.Frame):
         # Header row
         hdr = tk.Frame(self, bg=C_BG)
         hdr.pack(fill=tk.X, padx=8, pady=(8, 4))
-        tk.Label(hdr, text="HEAP VIEWER  —  Banjo-Kazooie",
+        tk.Label(hdr, text="HEAP VIEWER",
                  font=("Courier New", 11, "bold"),
                  fg=C_HEADER, bg=C_BG).pack(side=tk.LEFT)
-        # Keep a reference so set_profile() can update the text
-        self._title_label = hdr.winfo_children()[-1]
         self._summary_var = tk.StringVar(value="")
         tk.Label(hdr, textvariable=self._summary_var,
                  font=FONT, fg=C_DIM, bg=C_BG).pack(side=tk.RIGHT)
@@ -351,6 +355,16 @@ class HeapView(tk.Frame):
         # Double-click resets the zoom back to the whole heap - otherwise
         # there'd be no quick way back out once zoomed in deep.
         self._canvas.bind("<Double-Button-1>", self._on_bar_reset_zoom)
+        # Right-click-drag pans left/right within the current zoom level,
+        # without changing how zoomed in it is. Button-2 is bound too for
+        # macOS two-finger click, matching the convention used elsewhere
+        # in this file for right-click.
+        for _down in ("<Button-3>", "<Button-2>"):
+            self._canvas.bind(_down, self._on_bar_pan_start)
+        for _drag in ("<B3-Motion>", "<B2-Motion>"):
+            self._canvas.bind(_drag, self._on_bar_pan_motion)
+        for _up in ("<ButtonRelease-3>", "<ButtonRelease-2>"):
+            self._canvas.bind(_up, self._on_bar_pan_end)
 
         # Toolbar
         tb = tk.Frame(self, bg=C_PANEL)
@@ -666,6 +680,22 @@ class HeapView(tk.Frame):
             f"TOTAL {heap_size/1024:.0f} KB"
         )
 
+    def _full_heap_range(self):
+        """(heap_start, heap_size) for the whole heap, regardless of the
+        current bar zoom/pan window. Shared by _redraw_bar, the wheel-zoom
+        handler, and the right-click pan handlers so they all agree on the
+        same range to zoom/pan within. Returns (None, None) if unknown."""
+        heap_start = self._profile.heap_start if self._profile else HEAP_START
+        heap_size  = self._profile.heap_size  if self._profile else HEAP_SIZE
+        # For profiles where heap bounds are discovered dynamically (heap_size=0),
+        # derive the range from the actual block list.
+        if not heap_size and self._blocks:
+            heap_start = self._blocks[0]["addr"]
+            heap_size  = self._blocks[-1]["end_addr"] + 1 - heap_start
+        if not heap_size:
+            return None, None
+        return heap_start, heap_size
+
     def _redraw_bar(self):
         c = self._canvas
         c.delete("all")
@@ -678,13 +708,7 @@ class HeapView(tk.Frame):
         H = c.winfo_height() or 22
         if not W or not self._blocks:
             return
-        heap_start = self._profile.heap_start if self._profile else HEAP_START
-        heap_size  = self._profile.heap_size  if self._profile else HEAP_SIZE
-        # For profiles where heap bounds are discovered dynamically (heap_size=0),
-        # derive the range from the actual block list.
-        if not heap_size and self._blocks:
-            heap_start = self._blocks[0]["addr"]
-            heap_size  = self._blocks[-1]["end_addr"] + 1 - heap_start
+        heap_start, heap_size = self._full_heap_range()
         if not heap_size:
             return
 
@@ -816,11 +840,7 @@ class HeapView(tk.Frame):
         else:
             zoom_in = event.delta > 0
 
-        heap_start = self._profile.heap_start if self._profile else HEAP_START
-        heap_size  = self._profile.heap_size  if self._profile else HEAP_SIZE
-        if not heap_size and self._blocks:
-            heap_start = self._blocks[0]["addr"]
-            heap_size  = self._blocks[-1]["end_addr"] + 1 - heap_start
+        heap_start, heap_size = self._full_heap_range()
         if not heap_size:
             return
 
@@ -847,6 +867,52 @@ class HeapView(tk.Frame):
         self._bar_view_start_frac = 0.0
         self._bar_view_end_frac   = 1.0
         self._redraw_bar()
+
+    # ── Heap bar right-click-drag panning ────────────────────────────────────
+    # Slides the view left/right while zoomed in, without changing the zoom
+    # level itself - the span (view_size / _bar_view_end_frac - _bar_view_
+    # start_frac) never changes here, only where that span starts.
+
+    def _on_bar_pan_start(self, event):
+        if self._bar_view_start is None or self._bar_view_size is None:
+            return
+        self._bar_pan_start_x          = event.x
+        self._bar_pan_start_view_start = self._bar_view_start
+        # Hovering/tooltip doesn't make sense mid-pan-drag.
+        self._clear_bar_hover()
+
+    def _on_bar_pan_motion(self, event):
+        if self._bar_pan_start_x is None or self._bar_pan_start_view_start is None:
+            return
+        W = self._canvas.winfo_width()
+        if not W:
+            return
+        heap_start, heap_size = self._full_heap_range()
+        if not heap_size:
+            return
+
+        view_size = self._bar_view_size
+        # Dragging right reveals heap content that was further left, i.e.
+        # the view start moves opposite the cursor - the classic "grab and
+        # drag the content" panning feel.
+        dx_pixels = event.x - self._bar_pan_start_x
+        dx_bytes  = dx_pixels * (view_size / W)
+        new_start = self._bar_pan_start_view_start - dx_bytes
+        new_start = max(heap_start, min(new_start, heap_start + heap_size - view_size))
+
+        self._bar_view_start_frac = (new_start - heap_start) / heap_size
+        self._bar_view_end_frac   = (new_start + view_size - heap_start) / heap_size
+
+        # <Motion> doesn't fire while a button is held down, so _bar_last_xy
+        # would otherwise stay stuck at wherever the drag started - making
+        # _redraw_bar() reapply the hover/tooltip at a now-stale position
+        # instead of whatever's actually under the cursor mid-drag.
+        self._bar_last_xy = (event.x, event.y)
+        self._redraw_bar()
+
+    def _on_bar_pan_end(self, _event=None):
+        self._bar_pan_start_x = None
+        self._bar_pan_start_view_start = None
 
     def _ensure_bar_tooltip(self):
         if self._bar_tooltip is not None:
