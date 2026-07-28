@@ -1883,12 +1883,15 @@ class XeniaMemoryReader:
             walked  = blocks[-1]["xenia_guest"] + (blocks[-1]["next"]
                                                    - blocks[-1]["addr"]) \
                       if blocks else d["base"]
-            accounted = (walked - d["base"]) + sum(r[2] for r in regions)
+            # Free regions are walked through now (emitted as FREE blocks), so
+            # the covered extent already includes them — adding them again
+            # double counted and produced a negative shortfall.
+            accounted = walked - d["base"]
             out.append("     regions @0x%08X: %d, chain ends 0x%08X, "
-                       "accounted 0x%X of 0x%X%s"
+                       "covers 0x%X of 0x%X%s"
                        % (d["regions"], len(regions), walked,
                           accounted, d["size"],
-                          "" if accounted == d["size"]
+                          "" if accounted >= d["size"]
                           else "   <-- 0x%X unaccounted" % (d["size"] - accounted)))
             for rec, base, size, rflags in regions:
                 out.append("       @0x%08X base=0x%08X size=0x%-8X flags=0x%08X"
@@ -1896,6 +1899,8 @@ class XeniaMemoryReader:
             for b in bad[:4]:
                 out.append("       flagged 0x%08X: %s"
                            % (b["xenia_guest"], "; ".join(b["xenia_errors"])))
+            if blocks and blocks[-1].get("xenia_stop_reason"):
+                out.append("       %s" % blocks[-1]["xenia_stop_reason"])
 
         chosen = self.resolve_bk_heap_descriptor()
         out.append("chosen (game/level heap) = %s"
@@ -1941,15 +1946,36 @@ class XeniaMemoryReader:
         hdr_sz    = XENIA_BK_HDR_READ
         heap_end  = desc["end"]
 
+        # A heap is NOT one continuous chain.  It is runs of nodes separated by
+        # free REGIONS, which are tracked in a separate list and contain no node
+        # headers at all.  Without stepping over them the walk stops at the
+        # first one — on a fragmented heap that can be a third of the total.
+        region_map = {}
+        for _, rbase, rsize, _ in self.read_bk_region_records(desc.get("regions") or 0):
+            if rsize:
+                region_map[rbase] = rsize
+
         blocks      = []
         guest       = desc_guest
-        prev_size16 = 0          # the descriptor's own prev_size16 is 0
+        # The first node walked is not always the first node in the heap: the
+        # allocator's own heap puts its 0x630 root block ahead of the
+        # descriptor, so the descriptor's prev16 legitimately points back at it.
+        # Seeding 0 flagged that as corruption; None just skips the check once.
+        prev_size16 = None
         stop_reason = "hit XENIA_BK_MAX_NODES (%d)" % XENIA_BK_MAX_NODES
 
         while len(blocks) < XENIA_BK_MAX_NODES:
             if guest >= heap_end:
                 stop_reason = "reached heap end 0x%08X" % heap_end
                 break
+
+            # A free region here means the next node run starts after it.
+            if guest in region_map:
+                rsize = region_map[guest]
+                blocks.append(self._bk_region_block(guest, rsize))
+                guest      += rsize
+                prev_size16 = None      # chain restarts; nothing to verify against
+                continue
 
             host = self._bk_host(guest)
             data = self._read_raw(host, hdr_sz)
@@ -1970,6 +1996,7 @@ class XeniaMemoryReader:
             if size16 == 0:
                 stop_reason = "size16 == 0 at 0x%08X" % guest
                 break
+
 
             node_span = size16 * XENIA_BK_GRANULARITY
             errors    = []
@@ -2064,7 +2091,12 @@ class XeniaMemoryReader:
                 # rounded request, or merely not smaller than it.
                 rounded = ((data_size + XENIA_BK_GRANULARITY - 1)
                            & ~(XENIA_BK_GRANULARITY - 1))
-                if is_exact and rounded != chunk_size:
+                if chunk_size == 0:
+                    # Zero-byte allocation: header only, no payload.  data_size
+                    # still holds whatever the previous occupant left, so there
+                    # is nothing meaningful to validate it against.
+                    data_size = 0
+                elif is_exact and rounded != chunk_size:
                     errors.append("exact-fit but data_size=%08X rounds to %08X, "
                                   "capacity %08X" % (data_size, rounded, chunk_size))
                 elif rounded > chunk_size:
@@ -2110,6 +2142,7 @@ class XeniaMemoryReader:
                 # flink==blink and both inside the bin table means "not on any
                 # free list"; the value identifies which size-class bin this
                 # node belongs to.  Anything else is a live free-list link.
+                "xenia_region":   False,
                 "xenia_bin":      ((flink - XENIA_BK_BIN_TABLE) // 8
                                    if flink == blink and
                                    XENIA_BK_BIN_TABLE <= flink < XENIA_BK_BIN_TABLE_END
@@ -2119,8 +2152,16 @@ class XeniaMemoryReader:
             blocks.append(block)
 
             if is_last:
-                # Page-boundary node with nothing valid after it.  Everything
-                # past here is managed as free regions rather than as nodes.
+                # Nothing parseable follows.  If that is because a free region
+                # starts here, hop over it and keep going — the chain resumes on
+                # the far side.  Otherwise this really is the end.
+                nxt = guest + node_span
+                if nxt in region_map:
+                    rsize = region_map[nxt]
+                    blocks.append(self._bk_region_block(nxt, rsize))
+                    guest       = nxt + rsize
+                    prev_size16 = None
+                    continue
                 stop_reason = "after page-end block at 0x%08X: %s" % (guest, next_why)
                 break
 
@@ -2143,14 +2184,54 @@ class XeniaMemoryReader:
         # Record why the walk ended on the final block.  "Why did it stop here?"
         # is otherwise unanswerable from a dump alone, and the answer is the
         # difference between a heap that really is small and a walker bug.
+        # Kept OUT of xenia_errors on purpose: every walk ends somewhere, so
+        # counting the reason as an error means a perfectly healthy heap always
+        # reports at least one flagged node and the count stops meaning anything.
         if blocks:
             end_guest = blocks[-1]["xenia_guest"] + (blocks[-1]["next"]
                                                     - blocks[-1]["addr"])
-            blocks[-1]["xenia_stop_reason"] = stop_reason
-            blocks[-1]["xenia_errors"] = list(blocks[-1]["xenia_errors"]) + [
-                "walk ended at 0x%08X: %s" % (end_guest, stop_reason)]
+            blocks[-1]["xenia_stop_reason"] = ("walk ended at 0x%08X: %s"
+                                               % (end_guest, stop_reason))
 
         return blocks
+
+    def _bk_region_block(self, guest, size):
+        """
+        A free REGION: heap space held outside the node chain entirely.
+
+        Emitted so the address space stays contiguous and the space is counted
+        as free rather than vanishing between two node runs.
+        """
+        host = self._bk_host(guest)
+        return {
+            "addr":       host,
+            "end_addr":   host + size - 1,
+            "prev":       host,
+            "next":       host + size,
+            "state":      HEAP_STATE_EMPTY,
+            "chunk_size": size,
+            "used_size":  0,
+            "unused":     size,
+            "xenia_self_low": 0,
+            "xenia_data_len": 0,
+            "xenia_guest":    guest,
+            "xenia_payload":  None,
+            "xenia_hdr_size": 0,
+            "xenia_tracked":  False,
+            "xenia_pad":      0,
+            "xenia_exact":    False,
+            "xenia_last":     False,
+            "xenia_page_end": False,
+            "xenia_size16":   0,
+            "xenia_prev16":   0,
+            "xenia_flags":    0,
+            "xenia_flink":    0,
+            "xenia_blink":    0,
+            "xenia_is_desc":  False,
+            "xenia_bin":      None,
+            "xenia_region":   True,
+            "xenia_errors":   [],
+        }
 
     def _bk_unparsed_block(self, guest, stop, prev_size16):
         """A placeholder block covering [guest, stop) that failed to parse."""
@@ -2182,6 +2263,7 @@ class XeniaMemoryReader:
             "xenia_blink":    0,
             "xenia_is_desc":  False,
             "xenia_bin":      None,
+            "xenia_region":   False,
             "xenia_errors":   ["unparsed 0x%X bytes at 0x%08X" % (span, guest)],
         }
 

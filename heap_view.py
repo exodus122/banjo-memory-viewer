@@ -1257,7 +1257,9 @@ class HeapView(tk.Frame):
                         f"0x{b['xenia_size16']:04X}" if "xenia_size16" in b else "",
                         f"0x{b['xenia_flags']:08X}" if "xenia_flags" in b else "",
                         f"0x{b['xenia_self_low']:08X}" if "xenia_self_low" in b else "",
-                        "; ".join(b.get("xenia_errors", [])),
+                        "; ".join([n for n in
+                                   list(b.get("xenia_errors", []))
+                                   + [b.get("xenia_stop_reason")] if n]),
                     ])
             self._flash_dump_status(f"Saved → {filename}", ok=True)
         except OSError as e:
