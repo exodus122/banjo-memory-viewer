@@ -13,7 +13,8 @@ import os
 import sys
 import traceback
 
-from bizhawk_memory import XeniaMemoryReader, XENIA_BK_PROFILE
+from bizhawk_memory import (XeniaMemoryReader, XENIA_BK_PROFILE,
+                            XENIA_BT_PROFILE)
 
 
 def main():
@@ -24,11 +25,26 @@ def main():
     if not ok:
         return 1
 
-    # connect() auto-detects the game; force the BK profile so the BK walker is
-    # used even if detection guessed Tooie.
-    reader.profile = XENIA_BK_PROFILE
+    # connect() auto-detects the game.  Honour that, but fall back to BK.
+    is_bt = (profile is not None and profile.id == "xenia_bt")
+    reader.profile = XENIA_BT_PROFILE if is_bt else XENIA_BK_PROFILE
+    print("Running %s diagnostic" % ("Banjo-Tooie" if is_bt else "Banjo-Kazooie"))
 
     print()
+    if is_bt:
+        report = reader.debug_bt_heap()
+        print(report)
+        out_path = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                "debug_heap.txt")
+        try:
+            with open(out_path, "w", encoding="utf-8") as f:
+                f.write(msg + "\n\n" + report + "\n")
+            print("\nSaved to %s" % out_path)
+        except OSError as e:
+            print("\nCould not save report: %s" % e)
+        reader.disconnect()
+        return 0
+
     lines = [reader.debug_bk_heap()]
 
     # Try to put names to allocations by following pointers out of payloads.

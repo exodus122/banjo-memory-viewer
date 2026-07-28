@@ -1,188 +1,26 @@
-Connected (Xenia)  PID=17248  PHYS_BASE=0x00000001A0000000  Game=Banjo-Kazooie (Xenia)
+Connected (Xenia)  PID=9528  PHYS_BASE=0x00000001C0000000  Game=Banjo-Tooie (Xenia)
 
-profile      = Banjo-Kazooie (Xenia) (xenia_bk)
-connected    = True
-phys_base    = 0x0000000100000000   (corrected from 0x00000001A0000000, which reads as zeroes)
-base 0x00100000000 + 0x41A90000 -> 00 05 00 00 02 01 00 00 00 00 00 00 00 00 00 00 ff ee ff ee 00 00 00 00 40 00 00 00 00 04 00 00
-host_base    = 0x00100000000
-allocator root @ 0x40000000: size16=0063 flags=00010000 slot10=EEFFEEFF
-heaps found: 3
-  desc @0x41A90000 base=0x41A90000 end=0x41C90000 (0x200000  ) align=0x20   free=0x40000    n=10/5 -> 469 nodes, 0x122410 used, 1 flagged
-     regions @0x400005D0: 5, chain ends 0x41C90000, covers 0x200000 of 0x200000
-       @0x400005D0 base=0x41B00000 size=0x10000    flags=0x00000000
-       @0x400005C0 base=0x41B20000 size=0x10000    flags=0x00000000
-       @0x40000590 base=0x41B80000 size=0x10000    flags=0x00000000
-       @0x400005E0 base=0x41BD0000 size=0x30000    flags=0x00000000
-       @0x400005A0 base=0x41C50000 size=0x40000    flags=0x00000000
-       flagged 0x41C50000: walk ended at 0x41C90000: reached heap end 0x41C90000
-  desc @0x40000630 base=0x40000000 end=0x40100000 (0x100000  ) align=0x10   free=0x0        n=0/0 -> 652 nodes, 0xFBB40 used, 1 flagged
-     regions @0x00000000: 0, chain ends 0x40100000, covers 0x100000 of 0x100000
-       flagged 0x400FFFE0: walk ended at 0x40100000: after page-end block at 0x400FFFE0: 0x40100000 is at/past heap end 0x40100000
-  desc @0x40220000 base=0x40220000 end=0x40320000 (0x100000  ) align=0x10   free=0x0        n=0/0 -> 138 nodes, 0xFE0D0 used, 1 flagged
-     regions @0x00000000: 0, chain ends 0x40320000, covers 0x100000 of 0x100000
-       flagged 0x4031FFC0: walk ended at 0x40320000: after page-end block at 0x4031FFC0: 0x40320000 is at/past heap end 0x40320000
-chosen (game/level heap) = 0x41A90000
+phys_base = 0x0000000100000000  (corrected from 0x00000001C0000000)
+BK-style FFEEFFEE heap descriptors in this process: 3
+   desc @0x40320000 base=0x40320000 end=0x40520000 (0x200000) align=0x20
+   desc @0x40000630 base=0x40000000 end=0x40100000 (0x100000) align=0x10
+   desc @0x40220000 base=0x40220000 end=0x40320000 (0x100000) align=0x10
 
-=== heap @0x40000630 (base 0x40000000, 0x100000 bytes) ===
-  -- most common allocation sizes --
-     0x10       x280    (4480 bytes total)
-     0x20       x61     (1952 bytes total)
-     0x500      x19     (24320 bytes total)
-     0x300      x17     (13056 bytes total)
-     0x280      x16     (10240 bytes total)
-     0x30       x12     (576 bytes total)
-     0xE0       x9      (2016 bytes total)
-     0x400      x8      (8192 bytes total)
-     0xF0       x7      (1680 bytes total)
-     0x120      x7      (2016 bytes total)
-     0x60       x6      (576 bytes total)
-     0x50       x6      (480 bytes total)
-  -- text found in payloads --
-     x7     ps_3_0
-     x7     2.0.7
-     x6     Texture0
-     x5      DDDD
-     x3     (P@-
-     x2     Prim
-     x2     PrimCol
-     x2     <<Q@
-     x2     >v9F>
-     x1     PLAY GAME
-     x1     LEADERBOARDS
-     x1     ACHIEVEMENTS
-     x1     HELP & OPTIONS
-     x1     UNLOCK FULL GAME
-     x1     RETURN TO ARCADE
-     x1     HOW TO PLAY
-     x1     CONTROLS
-     x1     SETTINGS
-     x1     CREDITS
-     x1     MUSIC
-  -- XEX pointers by payload offset --
-     +0x0    0x82015F60 x18    
-     +0x48   0x8205C070 x7     
-     +0x68   0x8205C050 x7     
-     +0x10   0x820740A8 x7     
-     +0x10   0x820558D8 x7     
-     +0x14   0x82484A00 x7     
-     +0x30   0x820558C4 x7     
-     +0x10   0x8205C070 x6     
-     +0x30   0x8205C050 x6     
-     +0x10   0x820740DC x5     
-     +0x10   0x8205C0E8 x5     
-     +0x30   0x8205C0B0 x5     
-     +0x18   0x823DE9C8 x5     
-     +0x5C   0x823DE9C8 x5     
-     +0x6C   0x823DE9C8 x5     
-  -- grouped by leading XEX pointer --
-     0x82015F60 x18         288 bytes  sizes=0x10,0x10,0x10       
-     0x82440270 x1          128 bytes  sizes=0x80                 
-     0x8248C9E8 x1         2048 bytes  sizes=0x800                
-
-=== heap @0x40220000 (base 0x40220000, 0x100000 bytes) ===
-  -- most common allocation sizes --
-     0x10       x25     (400 bytes total)
-     0x20       x19     (608 bytes total)
-     0x40       x18     (1152 bytes total)
-     0x340      x7      (5824 bytes total)
-     0x1B0      x7      (3024 bytes total)
-     0x50       x7      (560 bytes total)
-     0x600      x4      (6144 bytes total)
-     0xAA0      x3      (8160 bytes total)
-     0x30       x3      (144 bytes total)
-     0x500      x2      (2560 bytes total)
-     0x90       x2      (288 bytes total)
-     0x70       x2      (224 bytes total)
-  -- text found in payloads --
-     x2     fgA 
-     x2     st v
-     x1     L?+^J>
-     x1     X,@-
-     x1     _ @-
-     x1     _$@-
-     x1     V @-
-     x1     RESUME GAME
-     x1     VIEW TOTALS
-     x1     LEADERBOARDS
-     x1     ACHIEVEMENTS
-     x1     @@=s@
-     x1     fhA 
-     x1     @@fj@
-     x1     @@fe@
-     x1     @@fi@
-     x1     st (
-  -- XEX pointers by payload offset --
-     +0x24   0x8212D310 x4     
-     +0x30   0x8212D310 x4     
-     +0x2C   0x8212D310 x4     
-     +0x38   0x8212D310 x4     
-     +0x28   0x8212D310 x4     
-     +0x34   0x8212D310 x4     
-     +0x3C   0x8212D310 x3     
-     +0x10   0x820559A0 x2     
-     +0x14   0x82484E30 x2     
-     +0x30   0x8205598C x2     
-     +0x34   0x82055978 x2     
-     +0x60   0x823E2850 x2     
-     +0x64   0x823E0C18 x2     
-     +0x10   0x82055BE8 x2     
-     +0x14   0x82055B80 x2     
-  -- grouped by leading XEX pointer --
-     0x82015F60 x1           16 bytes  sizes=0x10                 
-
-=== heap @0x41A90000 (base 0x41A90000, 0x200000 bytes) ===
-  -- most common allocation sizes --
-     0x20       x68     (2176 bytes total)
-     0x30       x45     (2160 bytes total)
-     0x10       x41     (656 bytes total)
-     0x40       x31     (1984 bytes total)
-     0x1B0      x30     (12960 bytes total)
-     0x50       x25     (2000 bytes total)
-     0x1A0      x15     (6240 bytes total)
-     0x80       x8      (1024 bytes total)
-     0x0        x8      (0 bytes total)
-     0x70       x7      (784 bytes total)
-     0x1110     x6      (26208 bytes total)
-     0x60       x5      (480 bytes total)
-  -- text found in payloads --
-     x7     k(>L
-     x4     RESUME GAME
-     x3     HELP & OPTIONS
-     x3     EnvCol
-     x2     VIEW TOTALS
-     x1     ZK?~
-     x1     @@=p?
-     x1     @@=p@
-     x1     @@ff@
-     x1      Az?
-     x1      Az>
-     x1     ?hX]
-     x1     EO#,
-     x1     EO*>
-     x1     U@E-+
-     x1     B6cgD
-     x1     TDrJx
-     x1     `Ev=
-     x1     P;v<
-     x1     ?fff?
-  -- XEX pointers by payload offset --
-     +0xC    0x8212D310 x10    
-     +0x18   0x8212D310 x8     
-     +0x0    0x8212D310 x6     
-     +0x8    0x82466488 x6     
-     +0x38   0x8212D310 x6     
-     +0x1C   0x8212D310 x5     
-     +0x44   0x8212D310 x4     
-     +0x8    0x8212D310 x3     
-     +0x3C   0x8212D310 x3     
-     +0x2C   0x8212D310 x3     
-     +0x24   0x8212D310 x3     
-     +0x14   0x824664AC x3     
-     +0x0    0x82015F60 x3     
-     +0x28   0x8212D310 x3     
-     +0x14   0x8212D310 x2     
-  -- grouped by leading XEX pointer --
-     0x8212D310 x6         2000 bytes  sizes=0x20,0x10,0x10       
-     0x82015F60 x3           48 bytes  sizes=0x10,0x10,0x10       
-     0x8246CF00 x1           32 bytes  sizes=0x20                 
-     0x8209F3E8 x1           32 bytes  sizes=0x20                 
+slab walk from guest 0x00070000: 72 nodes
+   note: unreadable at guest 0x00670000
+   footer 0xDEDEDEDE: 72 ok, 0 wrong, 0 unchecked
+   10 nodes span >1 slab, 27 nodes are <0x1000 bytes
+   (many small nodes each burning a 64KB slab would be very odd — suspect the stride)
+   first nodes:
+     0x00070000 len=0x21DC0    slots=3   footer=True  [00 07 00 00 00 02 1d c0 de de de de de de de de]
+     0x000A0000 len=0x21DC0    slots=3   footer=True  [00 0a 00 00 00 02 1d c0 de de de de de de de de]
+     0x000D0000 len=0x10F00    slots=2   footer=True  [00 0d 00 00 00 01 0f 00 de de de de de de de de]
+     0x000F0000 len=0x21DC0    slots=3   footer=True  [00 0f 00 00 00 02 1d c0 de de de de de de de de]
+     0x00120000 len=0x4A380    slots=5   footer=True  [00 12 00 00 00 04 a3 80 de de de de de de de de]
+     0x00170000 len=0x4A380    slots=5   footer=True  [00 17 00 00 00 04 a3 80 de de de de de de de de]
+     0x001C0000 len=0x12C00    slots=2   footer=True  [00 1c 00 00 00 01 2c 00 de de de de de de de de]
+     0x001E0000 len=0x12C00    slots=2   footer=True  [00 1e 00 00 00 01 2c 00 de de de de de de de de]
+     0x00200000 len=0x1AE0     slots=1   footer=True  [00 20 00 00 00 00 1a e0 de de de de de de de de]
+     0x00210000 len=0x1AE0     slots=1   footer=True  [00 21 00 00 00 00 1a e0 de de de de de de de de]
+     0x00220000 len=0x14A0     slots=1   footer=True  [00 22 00 00 00 00 14 a0 de de de de de de de de]
+     0x00230000 len=0x634F0    slots=7   footer=True  [00 23 00 00 00 06 34 f0 de de de de de de de de]

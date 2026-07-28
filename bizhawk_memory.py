@@ -109,8 +109,15 @@ XENIA_MEM_SIZE      = 0x20000000   # 512 MB physical address space scanned
 # NOT stable across sessions.  The two guest addresses below are the values
 # observed in one session and are used only as first-guess candidates.
 XENIA_BK_ROOT_GUEST      = 0x40000000  # allocator root / bin table block
-XENIA_BK_DESC_GUEST      = 0x41A90000  # game heap descriptor  (observed; may move)
+XENIA_BK_DESC_GUEST      = 0x41A90000  # BK game heap descriptor (observed)
+XENIA_BT_DESC_GUEST      = 0x40320000  # BT game heap descriptor (observed)
 XENIA_BK_CTRL_DESC_GUEST = 0x40000630  # allocator control heap (0x40000000..0x40100000)
+
+# Banjo-Tooie uses this SAME allocator — three heaps, identical layout, with the
+# game heap again distinguished by 0x20 alignment where the allocator's own
+# heaps use 0x10.  BT additionally has a separate slab heap at guest 0x70000
+# (see _walk_heap_bt), but the BK-style game heap is the interesting one.
+XENIA_GAME_DESC_GUESSES  = (XENIA_BK_DESC_GUEST, XENIA_BT_DESC_GUEST)
 
 XENIA_BK_BASE_HDR      = 0x10          # base header every node has
 XENIA_BK_HDR_SIZE      = 0x60          # tracked node header; payload at P+0x60
@@ -215,6 +222,9 @@ XENIA_BT_FOOTER_SIZE = 0x40        # 0x10 × 0xDEDEDEDE sentinel words after pay
 XENIA_BT_FOOTER_MARK = 0xDEDEDEDE
 # Maximum number of nodes to walk before giving up (safety cap).
 XENIA_BT_MAX_NODES   = 4096
+# Unused slabs sit between live nodes, so the walk steps over them.  This caps
+# how long a run of them may be before the heap is considered finished.
+XENIA_BT_MAX_GAP_SLABS = 32
 
 
 # ── Game Profile ──────────────────────────────────────────────────────────────
@@ -376,8 +386,11 @@ XENIA_BT_PROFILE = GameProfile(
     # heap_start is the first observed node address.
     # heap_size is set to a large cap — the walker self-terminates when the
     # self-pointer check fails, so the actual end is discovered dynamically.
-    heap_start=XENIA_BT_HEAP_START,
-    heap_size =XENIA_MEM_SIZE,   # 512 MB cap; walker stops at first invalid node
+    # Bounds are discovered from the heap descriptor at walk time; leaving them
+    # at 0 makes the view derive its range from the blocks actually found,
+    # instead of stretching the address bar across a 512 MB cap.
+    heap_start=0,
+    heap_size =0,
 
     watches_file="bt_xenia_watches.json",
 
@@ -1023,6 +1036,8 @@ class XeniaMemoryReader:
         self._bk_desc_guest: Optional[int] = None
         # Every heap descriptor found, cached; the game uses several at once.
         self._bk_desc_list: list = []
+        # Which heap the UI is showing.  None = the game/level heap.
+        self._heap_selection: Optional[str] = None
         # Host address of guest 0, as confirmed by an actual descriptor read.
         # _find_phys_base() can fall through to a scan and return something
         # other than XENIA_PHYS_BASE, so we don't take its word for it.
@@ -1337,64 +1352,204 @@ class XeniaMemoryReader:
         p = self.profile
 
         if p.id == "xenia_bk":
-            # Game/level heap only.  walk_all_bk_heaps() also exists if the
-            # shell and buffer heaps are ever wanted.
-            return self._walk_heap_bk()
+            return self._walk_heap_selected()
         if p.id != "xenia_bt":
+            return []
+        return self._walk_heap_selected()
+
+    # ── Heap selection ────────────────────────────────────────────────────────
+
+    SLAB_HEAP_KEY = "slab"
+    ALL_HEAPS_KEY = "all"
+
+    def list_heap_choices(self):
+        """
+        [(key, label)] of heaps the UI can show, game heap first.
+
+        Both games run the same allocator with three heaps, and Tooie adds a
+        separate slab heap.  Which one matters depends on what you are looking
+        for, so this is a choice rather than a guess.
+        """
+        if self.profile.id not in ("xenia_bk", "xenia_bt"):
             return []
         if self._phys_base is None:
             return []
 
+        out = []
+        descs = []
+        for guest in self.list_bk_heaps():
+            d = self.read_bk_heap_descriptor(guest)
+            if d:
+                descs.append(d)
+        # Alignment 0x20 marks the game heap; the allocator's own heaps use 0x10.
+        descs.sort(key=lambda d: (d["alignment"], d["size"]), reverse=True)
+
+        for d in descs:
+            if d["alignment"] == 0x20:
+                role = "Game"
+            elif d["base"] == XENIA_BK_ROOT_GUEST:
+                role = "Shell"
+            else:
+                role = "Buffer"
+            out.append(("0x%08X" % d["guest"],
+                        "%s  0x%08X  (%d KB)"
+                        % (role, d["guest"], d["size"] // 1024)))
+
+        if self.profile.id == "xenia_bt":
+            out.append((self.SLAB_HEAP_KEY, "Slab  guest 0x70000  (assets)"))
+
+        if len(out) > 1:
+            out.append((self.ALL_HEAPS_KEY, "All heaps"))
+        return out
+
+    def set_heap_selection(self, key):
+        self._heap_selection = key or None
+
+    def get_heap_selection(self):
+        return self._heap_selection
+
+    def _walk_heap_selected(self):
+        """Walk whichever heap the UI has selected; default is the game heap."""
+        sel = self._heap_selection
+
+        if sel == self.SLAB_HEAP_KEY:
+            return self._walk_heap_bt()
+
+        if sel == self.ALL_HEAPS_KEY:
+            blocks = []
+            if self.profile.id == "xenia_bt":
+                blocks += self._walk_heap_bt()
+            for guest in self.list_bk_heaps():
+                blocks += self._walk_heap_bk(guest)
+            blocks.sort(key=lambda b: b["addr"])
+            return blocks
+
+        if sel:
+            try:
+                return self._walk_heap_bk(int(sel, 16))
+            except ValueError:
+                pass
+
+        return self._walk_heap_bk()      # default: game/level heap
+
+    def _walk_heap_bt(self):
+        """
+        Walk the Banjo-Tooie slab heap.
+
+        Node format (verified: 67/67 footers matched in a live walk):
+            +0x00  u32  self      == this node's guest address
+            +0x04  u32  data_len  payload bytes
+            +0x08  0x38 bytes of 0xDE fill
+            +0x40  payload
+            +0x40+data_len  0x40 bytes of 0xDEDEDEDE footer
+        Nodes start on 0x10000 boundaries and occupy
+        ceil((0x40 + data_len + 0x40) / 0x10000) slabs.
+
+        Unlike the previous version this does NOT stop at the first slab whose
+        self-pointer doesn't match: unused slabs sit between live ones, and
+        stopping at the first turns the heap into whatever prefix happened to be
+        contiguous.  Empty slabs are emitted as FREE blocks instead.
+        """
+        if self._phys_base is None:
+            return []
+
+        # Pins down the real host base; _find_phys_base() has returned junk
+        # (0x1C0000000 under Tooie) which every other view then reads through.
+        self.confirm_bk_host_base()
+        base = (self._bk_host_base if self._bk_host_base is not None
+                else (self._phys_base or XENIA_PHYS_BASE))
+
         stride    = XENIA_BT_SLAB_STRIDE
         hdr_sz    = XENIA_BT_HDR_SIZE
         footer_sz = XENIA_BT_FOOTER_SIZE
-        blocks    = []
-        host      = XENIA_BT_HEAP_START
+
+        blocks = []
+        guest  = (XENIA_BT_HEAP_START - XENIA_PHYS_BASE) & 0xFFFFFFFF
+        misses = 0
+        stop_reason = "hit XENIA_BT_MAX_NODES (%d)" % XENIA_BT_MAX_NODES
 
         while len(blocks) < XENIA_BT_MAX_NODES:
+            host = base + guest
             data = self._read_raw(host, hdr_sz)
             if not data or len(data) < hdr_sz:
+                stop_reason = "unreadable at guest 0x%08X" % guest
                 break
 
             self_low = struct.unpack_from(">I", data, 0x00)[0]
             data_len = struct.unpack_from(">I", data, 0x04)[0]
 
-            # Self-pointer sanity check — mismatch means end of heap.
-            expected_low = (host - XENIA_PHYS_BASE) & 0xFFFFFFFF
-            if self_low != expected_low:
-                break
+            if self_low != guest or data_len > XENIA_MEM_SIZE:
+                # Unused slab.  Record it and keep going; only give up after a
+                # long unbroken run of them, which means the heap really ended.
+                misses += 1
+                if misses > XENIA_BT_MAX_GAP_SLABS:
+                    stop_reason = ("%d empty slabs in a row ending 0x%08X"
+                                   % (misses, guest))
+                    break
+                blocks.append(self._bt_empty_slab(base, guest, stride))
+                guest += stride
+                continue
+            misses = 0
 
-            # Implausibly large payload — treat as end of heap.
-            if data_len > XENIA_MEM_SIZE:
-                break
+            errors  = []
+            content = hdr_sz + data_len + footer_sz
+            slots   = (content + stride - 1) // stride
+            span    = slots * stride
 
-            # State: FREE if data_len == 0, else USED.
-            state = HEAP_STATE_EMPTY if data_len == 0 else HEAP_STATE_USED
+            # The 0xDEDEDEDE marker is an independent check on data_len; if it
+            # is not where data_len says it should be, the length is wrong.
+            foot = self._read_raw(host + hdr_sz + data_len, 4)
+            if not foot or len(foot) < 4:
+                errors.append("footer unreadable at +0x%X" % (hdr_sz + data_len))
+            elif struct.unpack_from(">I", foot, 0)[0] != XENIA_BT_FOOTER_MARK:
+                errors.append("footer at +0x%X is %08X, expected %08X"
+                              % (hdr_sz + data_len,
+                                 struct.unpack_from(">I", foot, 0)[0],
+                                 XENIA_BT_FOOTER_MARK))
 
-            # How many 0x10000 slots does this node occupy?
-            node_content = hdr_sz + data_len + footer_sz
-            slots = (node_content + stride - 1) // stride   # ceil division
-            node_span = slots * stride   # total host bytes occupied
-
-            block = {
+            capacity = span - hdr_sz - footer_sz
+            blocks.append({
                 "addr":       host,
-                "end_addr":   host + node_span - 1,
-                "prev":       host,   # no explicit prev pointer in this format
-                "next":       host + node_span,
-                "state":      state,
-                # chunk_size = usable payload capacity for this node's slot(s)
-                "chunk_size": slots * stride - hdr_sz - footer_sz,
+                "end_addr":   host + span - 1,
+                "prev":       host,      # no explicit prev pointer in this format
+                "next":       host + span,
+                "state":      HEAP_STATE_EMPTY if data_len == 0 else HEAP_STATE_USED,
+                "chunk_size": capacity,
                 "used_size":  data_len,
-                "unused":     (slots * stride - hdr_sz - footer_sz) - data_len,
-                # Xenia-specific extras for the detail pane
+                "unused":     capacity - data_len,
                 "xenia_self_low": self_low,
                 "xenia_data_len": data_len,
+                "xenia_guest":    guest,
                 "xenia_slots":    slots,
-            }
-            blocks.append(block)
-            host += node_span
+                "xenia_errors":   errors,
+            })
+            guest += span
 
+        if blocks:
+            blocks[-1]["xenia_stop_reason"] = ("walk ended at 0x%08X: %s"
+                                               % (guest, stop_reason))
+        for b in blocks:
+            b["xenia_heap"] = "slab"
         return blocks
+
+    def _bt_empty_slab(self, base, guest, stride):
+        """An unused 0x10000 slab between live BT nodes."""
+        host = base + guest
+        return {
+            "addr":       host,
+            "end_addr":   host + stride - 1,
+            "prev":       host,
+            "next":       host + stride,
+            "state":      HEAP_STATE_EMPTY,
+            "chunk_size": stride,
+            "used_size":  0,
+            "unused":     stride,
+            "xenia_self_low": 0,
+            "xenia_data_len": 0,
+            "xenia_guest":    guest,
+            "xenia_slots":    1,
+            "xenia_errors":   [],
+        }
 
     def _bk_host_base_candidates(self):
         """
@@ -1786,7 +1941,7 @@ class XeniaMemoryReader:
             return None
 
         chosen = next((d for d in candidates
-                       if d["guest"] == XENIA_BK_DESC_GUEST), None)
+                       if d["guest"] in XENIA_GAME_DESC_GUESSES), None)
         if chosen is None:
             game = [d for d in candidates if d["base"] != XENIA_BK_ROOT_GUEST]
             game.sort(key=lambda d: (d["alignment"], d["size"]), reverse=True)
@@ -2193,6 +2348,12 @@ class XeniaMemoryReader:
             blocks[-1]["xenia_stop_reason"] = ("walk ended at 0x%08X: %s"
                                                % (end_guest, stop_reason))
 
+        # Label every block with the heap it came from — Tooie shows two heaps
+        # at once and they are otherwise indistinguishable in the table.
+        label = "0x%08X" % desc_guest
+        for b in blocks:
+            b.setdefault("xenia_heap", label)
+
         return blocks
 
     def _bk_region_block(self, guest, size):
@@ -2342,6 +2503,117 @@ class XeniaMemoryReader:
                     return guest + off
             guest += len(data)
         return None
+
+    def survey_bt_heap(self, start=None, max_nodes=None):
+        """
+        Walk the BT slab heap recording every check rather than bailing.
+
+        Deliberately does not stop at the first bad node: the point is to learn
+        whether the slab model is right, and stopping early is what hides that.
+        Returns (nodes, notes) where nodes is a list of dicts.
+        """
+        self.confirm_bk_host_base()          # also corrects _phys_base
+        base = (self._bk_host_base if self._bk_host_base is not None
+                else (self._phys_base or XENIA_PHYS_BASE))
+
+        guest = (XENIA_BT_HEAP_START - XENIA_PHYS_BASE) & 0xFFFFFFFF \
+            if start is None else start
+        limit = max_nodes or XENIA_BT_MAX_NODES
+
+        nodes, notes = [], []
+        misses = 0
+        while len(nodes) < limit:
+            host = base + guest
+            data = self._read_raw(host, XENIA_BT_HDR_SIZE)
+            if not data or len(data) < XENIA_BT_HDR_SIZE:
+                notes.append("unreadable at guest 0x%08X" % guest)
+                break
+
+            self_low = struct.unpack_from(">I", data, 0x00)[0]
+            data_len = struct.unpack_from(">I", data, 0x04)[0]
+            ok_self  = (self_low == guest)
+
+            # The footer marker is the independent check the walker never used.
+            footer_ok = None
+            if ok_self and 0 < data_len <= XENIA_MEM_SIZE:
+                foot = self._read_raw(host + XENIA_BT_HDR_SIZE + data_len, 4)
+                if foot and len(foot) == 4:
+                    footer_ok = (struct.unpack_from(">I", foot, 0)[0]
+                                 == XENIA_BT_FOOTER_MARK)
+
+            if not ok_self:
+                misses += 1
+                # Keep stepping by one slab so we can see whether the chain
+                # resumes — if it does, "stop at first mismatch" was wrong.
+                if misses > 32:
+                    notes.append("gave up after 32 consecutive misses at 0x%08X"
+                                 % guest)
+                    break
+                guest += XENIA_BT_SLAB_STRIDE
+                continue
+            misses = 0
+
+            content = XENIA_BT_HDR_SIZE + data_len + XENIA_BT_FOOTER_SIZE
+            slots   = (content + XENIA_BT_SLAB_STRIDE - 1) // XENIA_BT_SLAB_STRIDE
+            nodes.append({
+                "guest": guest, "self": self_low, "len": data_len,
+                "slots": slots, "footer_ok": footer_ok,
+                "head": data[:16].hex(" "),
+            })
+            guest += slots * XENIA_BT_SLAB_STRIDE
+
+        return nodes, notes
+
+    def debug_bt_heap(self):
+        """Diagnostic for the Banjo-Tooie slab heap."""
+        out = []
+        if self._phys_base is None:
+            return "not connected"
+
+        detected = self._phys_base
+        self.confirm_bk_host_base()
+        out.append("phys_base = 0x%016X%s"
+                   % (self._phys_base,
+                      "" if detected == self._phys_base
+                      else "  (corrected from 0x%016X)" % detected))
+
+        # Does BT use the same allocator as BK?  If so the whole BK decode
+        # applies and the slab model is the wrong abstraction entirely.
+        descs = self.find_bk_heap_descriptors(deep=True)
+        out.append("BK-style FFEEFFEE heap descriptors in this process: %d"
+                   % len(descs))
+        for d in descs:
+            out.append("   desc @0x%08X base=0x%08X end=0x%08X (0x%X) align=0x%X"
+                       % (d["guest"], d["base"], d["end"], d["size"],
+                          d["alignment"]))
+
+        nodes, notes = self.survey_bt_heap()
+        out.append("")
+        out.append("slab walk from guest 0x%08X: %d nodes"
+                   % ((XENIA_BT_HEAP_START - XENIA_PHYS_BASE) & 0xFFFFFFFF,
+                      len(nodes)))
+        for n in notes:
+            out.append("   note: %s" % n)
+
+        good = sum(1 for n in nodes if n["footer_ok"] is True)
+        bad  = sum(1 for n in nodes if n["footer_ok"] is False)
+        out.append("   footer 0xDEDEDEDE: %d ok, %d wrong, %d unchecked"
+                   % (good, bad, len(nodes) - good - bad))
+
+        multi = sum(1 for n in nodes if n["slots"] > 1)
+        small = sum(1 for n in nodes if n["len"] < 0x1000)
+        out.append("   %d nodes span >1 slab, %d nodes are <0x1000 bytes"
+                   % (multi, small))
+        if small:
+            out.append("   (many small nodes each burning a 64KB slab would be "
+                       "very odd — suspect the stride)")
+
+        out.append("   first nodes:")
+        for n in nodes[:12]:
+            out.append("     0x%08X len=0x%-8X slots=%-3d footer=%-5s [%s]"
+                       % (n["guest"], n["len"], n["slots"],
+                          n["footer_ok"], n["head"]))
+        return "\n".join(out)
 
     def heap_summary(self, blocks):
         """Same interface as BizHawkMemoryReader.heap_summary()."""

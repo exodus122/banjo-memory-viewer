@@ -381,6 +381,17 @@ class HeapView(tk.Frame):
             btn.pack(side=tk.LEFT, padx=(0, 2))
             self._tab_btns[sv] = btn
 
+        # Heap selector.  Only the Xenia profiles have more than one heap, so it
+        # stays hidden otherwise (see _refresh_heap_choices).
+        self._heap_label = tk.Label(tb, text="  Heap:", font=FONT, fg=C_DIM,
+                                    bg=C_PANEL)
+        self._heap_var = tk.StringVar()
+        self._heap_combo = ttk.Combobox(tb, textvariable=self._heap_var,
+                                        state="readonly", width=26,
+                                        font=FONT)
+        self._heap_combo.bind("<<ComboboxSelected>>", self._on_heap_selected)
+        self._heap_keys: list = []
+
         tk.Label(tb, text="  Filter:", font=FONT, fg=C_DIM,
                  bg=C_PANEL).pack(side=tk.LEFT, padx=(8, 2))
         self._filter_var = tk.StringVar()
@@ -490,9 +501,49 @@ class HeapView(tk.Frame):
 
     # ── Public API ────────────────────────────────────────────────────────────
 
+    def _refresh_heap_choices(self, reader):
+        """Populate the heap dropdown, hiding it when there's nothing to pick."""
+        choices = []
+        if reader is not None and hasattr(reader, "list_heap_choices"):
+            try:
+                choices = reader.list_heap_choices()
+            except Exception:
+                choices = []
+
+        if not choices:
+            self._heap_label.pack_forget()
+            self._heap_combo.pack_forget()
+            self._heap_keys = []
+            return
+
+        keys   = [k for k, _ in choices]
+        labels = [lbl for _, lbl in choices]
+        if keys != self._heap_keys:
+            self._heap_keys = keys
+            self._heap_combo.configure(values=labels)
+            current = reader.get_heap_selection()
+            idx = keys.index(current) if current in keys else 0
+            self._heap_combo.current(idx)
+
+        if not self._heap_combo.winfo_ismapped():
+            self._heap_label.pack(side=tk.LEFT, padx=(8, 2))
+            self._heap_combo.pack(side=tk.LEFT, padx=2, pady=3)
+
+    def _on_heap_selected(self, _event=None):
+        idx = self._heap_combo.current()
+        if self._reader is None or not (0 <= idx < len(self._heap_keys)):
+            return
+        self._reader.set_heap_selection(self._heap_keys[idx])
+        # Switching heaps changes the address range entirely, so drop any
+        # selection and reset the bar rather than leaving a stale viewport.
+        self._selected = None
+        self._bar_view_start_frac = 0.0
+        self._bar_view_end_frac = 1.0
+
     def update_heap(self, blocks, reader):
         self._reader = reader
         self._blocks = blocks
+        self._refresh_heap_choices(reader)
 
         pid = self._profile.id if self._profile is not None else ""
         if pid == "xenia_bt":
@@ -1243,7 +1294,7 @@ class HeapView(tk.Frame):
         headers  = ["#", "State", "Address", "End", "Chunk (hex)", "Used (hex)",
                     "Chunk (bytes)", "Used (bytes)", "Wasted (bytes)",
                     "Source", "Type", "Label", "Prev", "Next",
-                    "Size16", "Flags", "Self", "Notes"]
+                    "Heap", "Size16", "Flags", "Self", "Notes"]
         try:
             with open(out_path, "w", newline="", encoding="utf-8") as f:
                 w = csv.writer(f)
@@ -1254,6 +1305,7 @@ class HeapView(tk.Frame):
                         b["chunk_size"], b["used_size"], b.get("unused", 0),
                         vals[6], vals[7], vals[8],
                         f"0x{b['prev']:08X}", f"0x{b['next']:08X}",
+                        b.get("xenia_heap", ""),
                         f"0x{b['xenia_size16']:04X}" if "xenia_size16" in b else "",
                         f"0x{b['xenia_flags']:08X}" if "xenia_flags" in b else "",
                         f"0x{b['xenia_self_low']:08X}" if "xenia_self_low" in b else "",
@@ -1987,11 +2039,12 @@ class HeapView(tk.Frame):
         def contains(ptr):
             if self._profile.id in ("bk", "bt"):
                 header_size = 0x10
-            elif self._profile.id == "xenia_bk":
-                # Xenia BK nodes come in two shapes: tracked (0x60 header) and
-                # untracked (0x10).  The walker records which, so use that
-                # rather than assuming one size for the whole heap.
-                header_size = block.get("xenia_hdr_size", 0x60)
+            elif "xenia_hdr_size" in block:
+                # Xenia allocator nodes come in two shapes: tracked (0x60
+                # header) and untracked (0x10).  The walker records which, so
+                # use that rather than assuming one size for the whole heap.
+                # Both Kazooie and Tooie use this allocator.
+                header_size = block["xenia_hdr_size"]
             else:
                 header_size = 0x40
 
