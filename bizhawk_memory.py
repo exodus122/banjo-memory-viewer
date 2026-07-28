@@ -1038,6 +1038,10 @@ class XeniaMemoryReader:
         self._bk_desc_list: list = []
         # Which heap the UI is showing.  None = the game/level heap.
         self._heap_selection: Optional[str] = None
+        # Rate limits for the expensive discovery paths (see _sweep_allowed).
+        self._bk_last_sweep: float = 0.0
+        self._heap_choices_cache: list = []
+        self._heap_choices_ts: float = 0.0
         # Host address of guest 0, as confirmed by an actual descriptor read.
         # _find_phys_base() can fall through to a scan and return something
         # other than XENIA_PHYS_BASE, so we don't take its word for it.
@@ -1056,6 +1060,8 @@ class XeniaMemoryReader:
             self._bk_desc_guest = None
             self._bk_desc_list = []
             self._bk_host_base = None
+            self._heap_choices_cache = []
+            self._bk_last_sweep = 0.0
 
     # ── Connection ────────────────────────────────────────────────────────────
 
@@ -1375,6 +1381,12 @@ class XeniaMemoryReader:
         if self._phys_base is None:
             return []
 
+        # Called from the UI on every refresh; the heaps are created once at
+        # startup, so re-reading their descriptors at frame rate is waste.
+        now = time.monotonic()
+        if self._heap_choices_cache and now - self._heap_choices_ts < 5.0:
+            return self._heap_choices_cache
+
         out = []
         descs = []
         for guest in self.list_bk_heaps():
@@ -1400,6 +1412,9 @@ class XeniaMemoryReader:
 
         if len(out) > 1:
             out.append((self.ALL_HEAPS_KEY, "All heaps"))
+
+        self._heap_choices_cache = out
+        self._heap_choices_ts = now
         return out
 
     def set_heap_selection(self, key):
@@ -1654,6 +1669,18 @@ class XeniaMemoryReader:
         desc["size"] = (desc["end"] - desc["base"]) & 0xFFFFFFFF
         return desc
 
+    # Minimum seconds between fallback magic sweeps.  The known-address and
+    # root-table paths cost a handful of small reads and are not throttled;
+    # only the multi-MB sweep is.
+    BK_SWEEP_MIN_INTERVAL = 5.0
+
+    def _sweep_allowed(self):
+        now = time.monotonic()
+        if now - self._bk_last_sweep < self.BK_SWEEP_MIN_INTERVAL:
+            return False
+        self._bk_last_sweep = now
+        return True
+
     def find_bk_heap_descriptors(self, deep=False):
         """
         Locate every BK heap descriptor reachable from the allocator root.
@@ -1721,13 +1748,30 @@ class XeniaMemoryReader:
 
         # Sweep for the magic when asked, or when the cheap paths turned up no
         # game heap at all.  The sweep is the only way to find a heap the root
-        # does not reference.
-        if deep or not any(d["base"] != XENIA_BK_ROOT_GUEST for d in found):
-            for guest in self._scan_bk_descriptor_magic():
-                consider(guest)
+        # does not reference — but it reads tens of MB, and "no game heap" is a
+        # normal transient state during a load, so unthrottled it would stall
+        # every refresh for as long as the heap is missing.  Diagnostics ask for
+        # it explicitly and are never rate limited.
+        if deep:
+            for lo, hi in self.BK_SCAN_WIDE:
+                for guest in self._scan_bk_descriptor_magic(lo, hi):
+                    consider(guest)
+        elif (not any(d["base"] != XENIA_BK_ROOT_GUEST for d in found)
+              and self._sweep_allowed()):
+            for lo, hi in self.BK_SCAN_NARROW:
+                for guest in self._scan_bk_descriptor_magic(lo, hi):
+                    consider(guest)
 
         found.sort(key=lambda d: d["size"], reverse=True)
         return found
+
+    # Ranges swept when looking for heaps we were not told about.  The narrow
+    # range is the allocator's own neighbourhood; the wide one also covers low
+    # guest memory, where Tooie's slab heap lives (guest 0x70000) and where a
+    # descriptor would otherwise be invisible to this scan.
+    BK_SCAN_NARROW = ((XENIA_BK_ROOT_GUEST, XENIA_BK_ROOT_GUEST + 0x02000000),)
+    BK_SCAN_WIDE   = ((0x00000000, 0x01000000),
+                      (XENIA_BK_ROOT_GUEST, XENIA_BK_ROOT_GUEST + 0x10000000))
 
     def _scan_bk_descriptor_magic(self, start=XENIA_BK_ROOT_GUEST,
                                   end=XENIA_BK_ROOT_GUEST + 0x02000000,
@@ -2019,6 +2063,8 @@ class XeniaMemoryReader:
         descs = self.find_bk_heap_descriptors(deep=True)
         if not descs:
             out.append("no heap descriptors found")
+        out.append("swept for FFEEFFEE in: %s"
+                   % ", ".join("0x%08X-0x%08X" % r for r in self.BK_SCAN_WIDE))
         out.append("heaps found: %d" % len(descs))
         for d in descs:
             blocks = self._walk_heap_bk(d["guest"])
@@ -2060,6 +2106,8 @@ class XeniaMemoryReader:
         chosen = self.resolve_bk_heap_descriptor()
         out.append("chosen (game/level heap) = %s"
                    % ("0x%08X" % chosen if chosen else "None"))
+        out.append("")
+        out.append(self.debug_memory_accounting())
         return "\n".join(out)
 
     def _walk_heap_bk(self, desc_guest=None):
@@ -2564,6 +2612,81 @@ class XeniaMemoryReader:
 
         return nodes, notes
 
+    def survey_guest_regions(self, span=0x50000000):
+        """
+        Every committed page in the guest mapping, as (guest, size, protect).
+
+        Sweeping for a magic value can only find heaps that carry that magic.
+        This asks the OS what is actually committed, so memory belonging to an
+        allocator we know nothing about still shows up.
+        """
+        if not self._k32 or not self.handle:
+            return []
+        base = (self._bk_host_base if self._bk_host_base is not None
+                else (self._phys_base or XENIA_PHYS_BASE))
+
+        out = []
+        mbi = MEMORY_BASIC_INFORMATION()
+        addr, end = base, base + span
+        while addr < end:
+            ret = self._k32.VirtualQueryEx(
+                self.handle, ctypes.c_void_p(addr),
+                ctypes.byref(mbi), ctypes.sizeof(mbi))
+            if not ret:
+                break
+            rbase = mbi.BaseAddress or addr
+            rsize = mbi.RegionSize or 0x1000
+            if mbi.State == MEM_COMMIT:
+                out.append((rbase - base, rsize, mbi.Protect))
+            addr = rbase + rsize
+        return out
+
+    def account_guest_memory(self, span=0x50000000):
+        """
+        Compare committed guest memory against the heaps we can explain.
+
+        Returns (total_committed, accounted, leftovers) where leftovers is a
+        list of (guest, size) not covered by any known heap, largest first.
+        A large leftover is either a heap we have not found or memory that is
+        not heap at all — the size is what tells you whether to care.
+        """
+        known = []
+        for guest in self.list_bk_heaps():
+            d = self.read_bk_heap_descriptor(guest)
+            if d:
+                known.append((d["base"], d["end"]))
+        if self.profile.id == "xenia_bt":
+            slab = self._walk_heap_bt()
+            if slab:
+                lo = (XENIA_BT_HEAP_START - XENIA_PHYS_BASE) & 0xFFFFFFFF
+                hi = slab[-1]["xenia_guest"] + (slab[-1]["next"]
+                                                - slab[-1]["addr"])
+                known.append((lo, hi))
+
+        total, accounted, leftovers = 0, 0, []
+        for guest, size, _prot in self.survey_guest_regions(span):
+            total += size
+            lo, hi = guest, guest + size
+            # Clip this region against every known heap range.
+            free_parts = [(lo, hi)]
+            for klo, khi in known:
+                nxt = []
+                for a, b in free_parts:
+                    if khi <= a or klo >= b:
+                        nxt.append((a, b))
+                        continue
+                    if a < klo:
+                        nxt.append((a, klo))
+                    if khi < b:
+                        nxt.append((khi, b))
+                free_parts = nxt
+            uncovered = sum(b - a for a, b in free_parts)
+            accounted += size - uncovered
+            leftovers.extend((a, b - a) for a, b in free_parts if b > a)
+
+        leftovers.sort(key=lambda r: r[1], reverse=True)
+        return total, accounted, leftovers
+
     def debug_bt_heap(self):
         """Diagnostic for the Banjo-Tooie slab heap."""
         out = []
@@ -2580,6 +2703,8 @@ class XeniaMemoryReader:
         # Does BT use the same allocator as BK?  If so the whole BK decode
         # applies and the slab model is the wrong abstraction entirely.
         descs = self.find_bk_heap_descriptors(deep=True)
+        out.append("swept for FFEEFFEE in: %s"
+                   % ", ".join("0x%08X-0x%08X" % r for r in self.BK_SCAN_WIDE))
         out.append("BK-style FFEEFFEE heap descriptors in this process: %d"
                    % len(descs))
         for d in descs:
@@ -2613,7 +2738,23 @@ class XeniaMemoryReader:
             out.append("     0x%08X len=0x%-8X slots=%-3d footer=%-5s [%s]"
                        % (n["guest"], n["len"], n["slots"],
                           n["footer_ok"], n["head"]))
+
+        out.append("")
+        out.append(self.debug_memory_accounting())
         return "\n".join(out)
+
+    def debug_memory_accounting(self):
+        """Committed guest memory vs. what the known heaps explain."""
+        total, accounted, leftovers = self.account_guest_memory()
+        lines = ["committed guest memory: 0x%X (%d MB)" % (total, total // (1 << 20)),
+                 "  explained by known heaps: 0x%X (%d%%)"
+                 % (accounted, (accounted * 100 // total) if total else 0),
+                 "  unexplained: 0x%X — largest runs:" % (total - accounted)]
+        for guest, size in leftovers[:12]:
+            lines.append("     0x%08X  0x%-9X (%d KB)" % (guest, size, size // 1024))
+        lines.append("  (large unexplained runs are either a heap we have not "
+                     "found, or not heap memory at all)")
+        return "\n".join(lines)
 
     def heap_summary(self, blocks):
         """Same interface as BizHawkMemoryReader.heap_summary()."""

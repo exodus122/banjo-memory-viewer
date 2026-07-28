@@ -1,6 +1,7 @@
 Connected (Xenia)  PID=9528  PHYS_BASE=0x00000001C0000000  Game=Banjo-Tooie (Xenia)
 
 phys_base = 0x0000000100000000  (corrected from 0x00000001C0000000)
+swept for FFEEFFEE in: 0x00000000-0x01000000, 0x40000000-0x50000000
 BK-style FFEEFFEE heap descriptors in this process: 3
    desc @0x40320000 base=0x40320000 end=0x40520000 (0x200000) align=0x20
    desc @0x40000630 base=0x40000000 end=0x40100000 (0x100000) align=0x10
