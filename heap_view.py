@@ -230,6 +230,10 @@ class HeapView(tk.Frame):
         # (addr, state, chunk_size) → (btype, blabel, bsource)
         self._tag_cache: dict = {}
         self._tag_scan_cache: list = []
+        # pointer → (btype, label, source), rebuilt with the cache above
+        self._tag_scan_index: dict = {}
+        self._tag_scan_ts: float = 0.0
+        self._tag_scan_pid: str = ""
 
         # iid → values-tuple last written to the tree widget
         self._render_cache: dict = {}
@@ -540,11 +544,15 @@ class HeapView(tk.Frame):
         self._bar_view_start_frac = 0.0
         self._bar_view_end_frac = 1.0
 
-    def update_heap(self, blocks, reader):
-        self._reader = reader
-        self._blocks = blocks
-        self._refresh_heap_choices(reader)
+    # Rebuilding the tag scan cache costs one ReadProcessMemory per pointer, and
+    # the N64 builders walk hundreds of table entries — well over a thousand
+    # syscalls.  That was running on every heap refresh, which is why BizHawk
+    # felt heavier than Xenia (whose builders read a handful of pointers).  The
+    # tags only change when the game loads or frees things, so a short interval
+    # is indistinguishable in practice.
+    _TAG_SCAN_INTERVAL = 0.5      # seconds
 
+    def _rebuild_tag_scan_cache(self, reader):
         pid = self._profile.id if self._profile is not None else ""
         if pid == "xenia_bt":
             self._tag_scan_cache = self._build_bt_xenia_tag_scan_cache(reader)
@@ -554,6 +562,27 @@ class HeapView(tk.Frame):
             self._tag_scan_cache = self._build_bt_tag_scan_cache(reader)
         else:
             self._tag_scan_cache = self._build_bk_tag_scan_cache(reader)
+
+        # Index by pointer so tag_block is a dict hit instead of a linear scan.
+        # Earlier entries win, matching the old first-match-wins behaviour.
+        index = {}
+        for ptr, btype, label, source in self._tag_scan_cache:
+            if ptr and ptr not in index:
+                index[ptr] = (btype, label, source)
+        self._tag_scan_index = index
+        self._tag_scan_ts = time.time()
+        self._tag_scan_pid = pid
+
+    def update_heap(self, blocks, reader):
+        self._reader = reader
+        self._blocks = blocks
+        self._refresh_heap_choices(reader)
+
+        pid = self._profile.id if self._profile is not None else ""
+        if (not self._tag_scan_index
+                or pid != self._tag_scan_pid
+                or time.time() - self._tag_scan_ts >= self._TAG_SCAN_INTERVAL):
+            self._rebuild_tag_scan_cache(reader)
 
         self._pre_tag_blocks(blocks, reader)
         self._refresh_table()
@@ -2065,11 +2094,20 @@ class HeapView(tk.Frame):
                     return "free", "", ""
                 return "used", f"payload={payload_len:#x}", ""'''
 
-            # All pointer lookups — including particle emitters — are now
-            # precomputed in _build_bk_tag_scan_cache/_build_bt_tag_scan_cache, so this is a single pass.
-            for ptr, btype, label, source in self._tag_scan_cache:
-                if contains(ptr):
-                    return btype, label, source
+            # All pointer lookups — including particle emitters — are
+            # precomputed in _build_*_tag_scan_cache.  Look them up through the
+            # dict built alongside that list: the cache runs to thousands of
+            # entries and the heap to thousands of blocks, so scanning it per
+            # block was millions of comparisons per refresh.
+            if self._profile.id in ("bk", "bt"):
+                header_size = 0x10
+            elif "xenia_hdr_size" in block:
+                header_size = block["xenia_hdr_size"]
+            else:
+                header_size = 0x40
+            hit = self._tag_scan_index.get(block["addr"] + header_size)
+            if hit is not None:
+                return hit
             
             if self._profile.id == "bk":
                 if block["addr"] == 0x8002D500:

@@ -262,17 +262,6 @@ XENIA_BK_PROFILE = GameProfile(
 ALL_XENIA_PROFILES = [XENIA_BT_PROFILE, XENIA_BK_PROFILE]
 
 
-# ==============================================================================
-# PASTE THE XeniaMemoryReader CLASS BELOW THIS LINE
-# ==============================================================================
-# Move it verbatim out of bizhawk_memory.py: everything from
-#
-#     class XeniaMemoryReader:
-#
-# to the end of that file.  It needs no edits — every name it references is
-# either defined above or imported from emu_common at the top of this file.
-# ==============================================================================
-
 # ── Xenia-canary reader ───────────────────────────────────────────────────────
 
 class XeniaMemoryReader:
