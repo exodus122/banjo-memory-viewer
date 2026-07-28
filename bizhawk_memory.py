@@ -63,6 +63,19 @@ XENIA_BK_SELF_OFF      = 0x20          # byte offset of self-ptr word in header
 XENIA_BK_SIZE_OFF      = 0x24          # byte offset of used-size word in header
 XENIA_BK_MAX_NODES     = 8192
 
+# Xenia BK heap: fixed start address, contiguous node layout.
+# Header layout (big-endian, 0x60 bytes):
+#   word[8]  (offset 0x20): self-pointer low32  == host_node_addr - XENIA_PHYS_BASE
+#   word[9]  (offset 0x24): used size (bytes of payload data; chunk_size is
+#                            used_size rounded up to the next 0x10 boundary)
+# Nodes are contiguous:
+#   next_node_host = current_node_host + 0x60 + chunk_size
+XENIA_BK_HEAP_START    = 0x141A90040   # host address of first node header
+XENIA_BK_HDR_SIZE      = 0x60          # bytes before payload in each node
+XENIA_BK_SELF_OFF      = 0x20          # byte offset of self-ptr word in header
+XENIA_BK_SIZE_OFF      = 0x24          # byte offset of used-size word in header
+XENIA_BK_MAX_NODES     = 8192
+
 # Xenia BT heap: fixed-stride slab allocator
 # Each slab starts on a 0x10000-byte boundary.  The payload (data_length) can
 # exceed 0x10000 bytes — in that case the node occupies multiple consecutive
@@ -1249,22 +1262,18 @@ class XeniaMemoryReader:
         """
         Walk the Xenia-canary BK heap.
 
-        Discovery:
-          The heap starts at the fixed host address XENIA_BK_HEAP_START.
+        The heap starts at the fixed host address XENIA_BK_HEAP_START.
 
         Node header layout (big-endian, 0x60 bytes total):
-          offset 0x20 (word 8):  self-ptr low32  == node_host - XENIA_PHYS_BASE
-          offset 0x24 (word 9):  used size       (bytes of actual data; chunk_size
-                                                  is used_size rounded up to 0x10,
-                                                  e.g. 0x258 → chunk 0x260, 0x90 → 0x90)
+          offset 0x20: self-ptr low32  — for USED nodes: (node_host + 0x20 - XENIA_PHYS_BASE)
+                                         for FREE nodes: 0x00000000
+          offset 0x24: used size       — for USED nodes: bytes of payload data;
+                                         chunk_size = (used_size + 0xF) & ~0xF
+                                         for FREE nodes: 0x00000000
 
-        Nodes are contiguous:
-          next_node_host = current_node_host + XENIA_BK_HDR_SIZE + chunk_size
-
-        Walking stops when:
-          - the self-pointer doesn't match the expected value, or
-          - the used size is implausibly large (> XENIA_MEM_SIZE), or
-          - XENIA_BK_MAX_NODES nodes have been read.
+        For free nodes the span is unknown from the header alone, so we scan
+        forward in 0x10-byte steps until we find the next valid self-pointer
+        (i.e. the next used or free node boundary).
         """
         if self._phys_base is None:
             return []
@@ -1285,6 +1294,7 @@ class XeniaMemoryReader:
 
             # Self-pointer sanity check — mismatch means end of heap.
             expected_low = (host - XENIA_PHYS_BASE + XENIA_BK_SELF_OFF) & 0xFFFFFFFF
+            #print(hex(expected_low) + ", " + hex(self_low))
             if self_low != expected_low:
                 break
 
