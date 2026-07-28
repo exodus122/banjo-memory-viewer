@@ -1242,7 +1242,8 @@ class HeapView(tk.Frame):
         visible  = self._build_visible()
         headers  = ["#", "State", "Address", "End", "Chunk (hex)", "Used (hex)",
                     "Chunk (bytes)", "Used (bytes)", "Wasted (bytes)",
-                    "Source", "Type", "Label", "Prev", "Next"]
+                    "Source", "Type", "Label", "Prev", "Next",
+                    "Size16", "Flags", "Self", "Notes"]
         try:
             with open(out_path, "w", newline="", encoding="utf-8") as f:
                 w = csv.writer(f)
@@ -1253,6 +1254,10 @@ class HeapView(tk.Frame):
                         b["chunk_size"], b["used_size"], b.get("unused", 0),
                         vals[6], vals[7], vals[8],
                         f"0x{b['prev']:08X}", f"0x{b['next']:08X}",
+                        f"0x{b['xenia_size16']:04X}" if "xenia_size16" in b else "",
+                        f"0x{b['xenia_flags']:08X}" if "xenia_flags" in b else "",
+                        f"0x{b['xenia_self_low']:08X}" if "xenia_self_low" in b else "",
+                        "; ".join(b.get("xenia_errors", [])),
                     ])
             self._flash_dump_status(f"Saved → {filename}", ok=True)
         except OSError as e:
@@ -1981,10 +1986,13 @@ class HeapView(tk.Frame):
             if self._profile.id in ("bk", "bt"):
                 header_size = 0x10
             elif self._profile.id == "xenia_bk":
-                header_size = 0x60
+                # Xenia BK nodes come in two shapes: tracked (0x60 header) and
+                # untracked (0x10).  The walker records which, so use that
+                # rather than assuming one size for the whole heap.
+                header_size = block.get("xenia_hdr_size", 0x60)
             else:
                 header_size = 0x40
-            
+
             return ptr and (block["addr"] + header_size) == ptr
 
         try:
