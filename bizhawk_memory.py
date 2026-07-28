@@ -138,6 +138,7 @@ XENIA_BK_DESC_FIRST_OFF   = 0x28
 XENIA_BK_DESC_END_OFF     = 0x2C
 XENIA_BK_DESC_COUNTA_OFF  = 0x30
 XENIA_BK_DESC_COUNTB_OFF  = 0x34
+XENIA_BK_DESC_REGIONS_OFF = 0x38   # head of this heap's free-REGION list
 XENIA_BK_DESC_TAIL_OFF    = 0x40
 
 # Observed flags: 0x02011000 (game heap allocation), 0x02010000 (game heap
@@ -155,6 +156,19 @@ XENIA_BK_FLAG_FREED     = 0x00002000   # seen set on freed nodes
 # behaviour, not corruption — the same request size appears exact-fitted
 # elsewhere in the same heap.
 XENIA_BK_FLAG_EXACT     = 0x00010000
+
+# Bit 20 marks a node that ENDS ON A 64KB COMMIT BOUNDARY.
+#
+# It was initially mistaken for an end-of-chain marker: in four consecutive
+# dumps the only node carrying it was the last one, because the trailing
+# uncarved block necessarily runs up to the edge of committed memory.  But a
+# perfectly ordinary allocation that happens to end on a boundary carries it
+# too (0x141B1E360, span 0x1CA0, valid self-pointer, ending at 0x141B20000),
+# and treating the bit as "stop here" truncated that heap from ~280 nodes to 27.
+#
+# So it is a HINT ONLY.  The walk stops when no valid node follows, which is
+# verified by reading the next header — never on the strength of this bit.
+XENIA_BK_FLAG_PAGE_END  = 0x00100000
 
 # Bits 8-11 hold the ROUNDING padding only: round_up(data_size, 0x10) -
 # data_size.  It is NOT the total slack; the two coincide only for exact-fit
@@ -1007,6 +1021,8 @@ class XeniaMemoryReader:
         # Guest address of the BK game-heap descriptor, discovered on first walk
         # and cached (heap descriptors do not move once the heap is created).
         self._bk_desc_guest: Optional[int] = None
+        # Every heap descriptor found, cached; the game uses several at once.
+        self._bk_desc_list: list = []
         # Host address of guest 0, as confirmed by an actual descriptor read.
         # _find_phys_base() can fall through to a scan and return something
         # other than XENIA_PHYS_BASE, so we don't take its word for it.
@@ -1023,6 +1039,7 @@ class XeniaMemoryReader:
         if clear_rdram:
             self._phys_base = None
             self._bk_desc_guest = None
+            self._bk_desc_list = []
             self._bk_host_base = None
 
     # ── Connection ────────────────────────────────────────────────────────────
@@ -1115,12 +1132,19 @@ class XeniaMemoryReader:
             return None
 
         # Try the canonical Xenia address first — fast path.
+        #
+        # The size threshold used to be 0x10000000 (256MB) in a SINGLE region,
+        # but Xenia splits the guest mapping into smaller regions with differing
+        # protections, so that test failed and the scan below picked an
+        # unrelated allocation (observed: 0x1A0000000, which reads as all
+        # zeroes).  A committed region plus a successful read is the honest
+        # check — guest physical 0 is what we want, not the largest region.
         candidate = XENIA_PHYS_BASE
         mbi = MEMORY_BASIC_INFORMATION()
         ret = self._k32.VirtualQueryEx(
             self.handle, ctypes.c_void_p(candidate),
             ctypes.byref(mbi), ctypes.sizeof(mbi))
-        if ret and mbi.State == MEM_COMMIT and mbi.RegionSize >= 0x10000000:
+        if ret and mbi.State == MEM_COMMIT and mbi.RegionSize >= 0x100000:
             return candidate
 
         # Slow path: scan near the 4 GB mark.
@@ -1313,6 +1337,8 @@ class XeniaMemoryReader:
         p = self.profile
 
         if p.id == "xenia_bk":
+            # Game/level heap only.  walk_all_bk_heaps() also exists if the
+            # shell and buffer heaps are ever wanted.
             return self._walk_heap_bk()
         if p.id != "xenia_bt":
             return []
@@ -1387,6 +1413,31 @@ class XeniaMemoryReader:
                 out.append(base)
         return out
 
+    def confirm_bk_host_base(self):
+        """
+        Pin down the host base by finding a descriptor, before anything else
+        reads guest memory.
+
+        Without this, _bk_host() falls back to self._phys_base, which
+        _find_phys_base() can get wrong — and then the allocator root and the
+        region records read as zeroes and are silently reported as absent.
+        """
+        if self._bk_host_base is not None:
+            return self._bk_host_base
+        for guest in (XENIA_BK_CTRL_DESC_GUEST, XENIA_BK_DESC_GUEST,
+                      self._bk_desc_guest):
+            if guest is not None and self.read_bk_heap_descriptor(guest):
+                break
+
+        # A confirmed descriptor magic is a far better oracle than
+        # _find_phys_base()'s region heuristic, which has been seen to return an
+        # unrelated mapping (0x1A0000000) that reads as all zeroes.  Correct the
+        # process-wide base too — every other view (watches, actors, hex) reads
+        # through _phys_base and would otherwise be looking at the wrong memory.
+        if self._bk_host_base is not None and self._bk_host_base != self._phys_base:
+            self._phys_base = self._bk_host_base
+        return self._bk_host_base
+
     def _bk_host(self, guest):
         """Host address for a guest address, using the confirmed base."""
         base = (self._bk_host_base if self._bk_host_base is not None
@@ -1442,12 +1493,13 @@ class XeniaMemoryReader:
             "end":         u32(XENIA_BK_DESC_END_OFF),
             "count_a":     u32(XENIA_BK_DESC_COUNTA_OFF),
             "count_b":     u32(XENIA_BK_DESC_COUNTB_OFF),
+            "regions":     u32(XENIA_BK_DESC_REGIONS_OFF),
             "tail":        u32(XENIA_BK_DESC_TAIL_OFF),
         }
         desc["size"] = (desc["end"] - desc["base"]) & 0xFFFFFFFF
         return desc
 
-    def find_bk_heap_descriptors(self):
+    def find_bk_heap_descriptors(self, deep=False):
         """
         Locate every BK heap descriptor reachable from the allocator root.
 
@@ -1467,6 +1519,7 @@ class XeniaMemoryReader:
         if self._phys_base is None:
             return []
 
+        self.confirm_bk_host_base()
         found, seen = [], set()
 
         def consider(guest):
@@ -1493,18 +1546,28 @@ class XeniaMemoryReader:
             consider(self._bk_desc_guest)
         consider(XENIA_BK_DESC_GUEST)
 
-        # Then every pointer-shaped word in the allocator root block's header.
-        root = self._read_raw(self._bk_host(XENIA_BK_ROOT_GUEST), 0x100)
-        if root and len(root) >= 0x100:
-            for off in range(0, 0x100, 4):
+        # Then every pointer-shaped word in the whole allocator root block.  The
+        # root is 0x630 bytes; scanning only its first 0x100 finds the heaps
+        # named in the header table but misses any listed further in.
+        root = self._read_raw(self._bk_host(XENIA_BK_ROOT_GUEST), 0x630)
+        if root:
+            for off in range(0, len(root) - 3, 4):
                 val = struct.unpack_from(">I", root, off)[0]
                 if XENIA_BK_ROOT_GUEST <= val < XENIA_BK_ROOT_GUEST + XENIA_MEM_SIZE:
                     consider(val)
 
-        # Last resort: if the root table didn't lead to a game heap, sweep the
-        # low physical region for the descriptor magic.  Only runs when the
-        # cheap paths failed, and the result is cached by the caller.
-        if not any(d["base"] != XENIA_BK_ROOT_GUEST for d in found):
+        # The region records also name memory ranges; each range base is a
+        # candidate descriptor address.  Take the list heads from the
+        # descriptors already found — calling read_bk_region_records() with no
+        # head would resolve the game heap, which calls back into here.
+        for d in list(found):
+            for _, base, _, _ in self.read_bk_region_records(d["regions"]):
+                consider(base)
+
+        # Sweep for the magic when asked, or when the cheap paths turned up no
+        # game heap at all.  The sweep is the only way to find a heap the root
+        # does not reference.
+        if deep or not any(d["base"] != XENIA_BK_ROOT_GUEST for d in found):
             for guest in self._scan_bk_descriptor_magic():
                 consider(guest)
 
@@ -1540,13 +1603,178 @@ class XeniaMemoryReader:
                 idx = data.find(magic, idx + 1)
             guest += size
 
+    # Guest range of the loaded XEX image.  Pointers into here are code or
+    # static data, so a pointer stored in a payload often names the allocation
+    # (a class vtable, or a literal string).
+    XEX_LO = 0x82000000
+    XEX_HI = 0x84000000
+
+    def read_bk_cstring(self, guest, maxlen=64):
+        """
+        Read a printable NUL-terminated string at `guest`, or None.
+
+        Requires at least 3 printable characters before the terminator so that
+        random pointer-shaped bytes don't get reported as text.
+        """
+        data = self._read_raw(self._bk_host(guest), maxlen)
+        if not data:
+            return None
+        out = []
+        for ch in data:
+            if ch == 0:
+                break
+            if ch < 0x20 or ch > 0x7E:
+                return None
+            out.append(chr(ch))
+        if len(out) < 3:
+            return None
+        return "".join(out)
+
+    @staticmethod
+    def _ascii_runs(data, minlen=4):
+        """Printable runs of at least `minlen` chars inside a byte string."""
+        runs, cur = [], []
+        for ch in data:
+            if 0x20 <= ch <= 0x7E:
+                cur.append(chr(ch))
+            else:
+                if len(cur) >= minlen:
+                    runs.append("".join(cur))
+                cur = []
+        if len(cur) >= minlen:
+            runs.append("".join(cur))
+        return runs
+
+    def survey_bk_heap(self, desc_guest, max_nodes=2000, scan=0x80):
+        """
+        Characterise a heap without needing names.
+
+        Three views, cheapest first:
+          * size histogram — many allocations of one exact size is a type, and
+            the size alone often identifies it
+          * text found ANYWHERE in the payload, not just at offset 0 (payloads
+            here carry FourCCs like "SETT"/"RANK" well inside the block)
+          * XEX pointers appearing at a consistent payload offset
+
+        Returns (sizes, texts, pointers), each a list of (key, count) sorted by
+        count descending.
+        """
+        sizes, texts, ptrs = {}, {}, {}
+
+        for b in self._walk_heap_bk(desc_guest)[:max_nodes]:
+            if b["state"] != HEAP_STATE_USED or not b.get("xenia_payload"):
+                continue
+            sizes[b["chunk_size"]] = sizes.get(b["chunk_size"], 0) + 1
+
+            data = self._read_raw(b["xenia_payload"],
+                                  min(scan, max(0x10, b["chunk_size"])))
+            if not data:
+                continue
+
+            for s in self._ascii_runs(data):
+                texts[s] = texts.get(s, 0) + 1
+
+            for off in range(0, len(data) - 3, 4):
+                w = struct.unpack_from(">I", data, off)[0]
+                if self.XEX_LO <= w < self.XEX_HI:
+                    ptrs[(off, w)] = ptrs.get((off, w), 0) + 1
+
+        def top(d):
+            return sorted(d.items(), key=lambda kv: kv[1], reverse=True)
+
+        return top(sizes), top(texts), top(ptrs)
+
+    def identify_bk_nodes(self, desc_guest, max_nodes=400, samples=3):
+        """
+        Try to name allocations by following pointers out of their payloads.
+
+        Untracked nodes put payload at P+0x10, and many begin with a pointer to
+        a vtable or a literal in the XEX image.  Group nodes by the first such
+        pointer found: a pointer shared by many allocations is a type, and if it
+        or the word next to it resolves to text, that text names the type.
+
+        Returns a list of (pointer, count, total_bytes, sample_string, sizes).
+        """
+        groups = {}
+        for b in self._walk_heap_bk(desc_guest)[:max_nodes]:
+            if b["state"] != HEAP_STATE_USED or not b.get("xenia_payload"):
+                continue
+            head = self._read_raw(b["xenia_payload"], 8)
+            if not head or len(head) < 8:
+                continue
+            w0, w1 = struct.unpack_from(">II", head, 0)
+            ptr = next((w for w in (w0, w1) if self.XEX_LO <= w < self.XEX_HI),
+                       None)
+            if ptr is None:
+                continue
+            g = groups.setdefault(ptr, {"count": 0, "bytes": 0, "sizes": []})
+            g["count"] += 1
+            g["bytes"] += b["chunk_size"]
+            if len(g["sizes"]) < samples:
+                g["sizes"].append(b["chunk_size"])
+
+        out = []
+        for ptr, g in groups.items():
+            # The pointer may be the string itself, or point at a struct whose
+            # first field is a name pointer — try both.
+            text = self.read_bk_cstring(ptr)
+            if text is None:
+                indirect = self._read_raw(self._bk_host(ptr), 4)
+                if indirect and len(indirect) == 4:
+                    inner = struct.unpack_from(">I", indirect, 0)[0]
+                    if self.XEX_LO <= inner < self.XEX_HI:
+                        text = self.read_bk_cstring(inner)
+            out.append((ptr, g["count"], g["bytes"], text, g["sizes"]))
+        out.sort(key=lambda r: r[1], reverse=True)
+        return out
+
+    def read_bk_region_records(self, head=None, limit=64):
+        """
+        Read a heap's free-region list:  {next, base, size, flags} × N.
+
+        These 16-byte records describe memory the allocator tracks as free
+        REGIONS rather than as heap nodes, so they account for space the node
+        walk never sees.
+
+        `head` defaults to the game heap's list.  Each heap has its OWN list —
+        the head is descriptor+0x38 — so passing a single hardcoded head leaves
+        the other heaps' free space unaccounted for.
+        """
+        if head is None:
+            # Resolve without going through resolve_bk_heap_descriptor(), which
+            # calls find_bk_heap_descriptors(), which calls back into here.
+            desc = self.read_bk_heap_descriptor(
+                self._bk_desc_guest if self._bk_desc_guest is not None
+                else XENIA_BK_DESC_GUEST)
+            head = desc["regions"] if desc else 0
+        out, seen, guest = [], set(), head & 0xFFFFFFFF
+        while guest and guest not in seen and len(out) < limit:
+            seen.add(guest)
+            data = self._read_raw(self._bk_host(guest), 0x10)
+            if not data or len(data) < 0x10:
+                break
+            nxt, base, size, flags = struct.unpack_from(">IIII", data, 0)
+            if base or size:
+                out.append((guest, base, size, flags))
+            guest = nxt & 0xFFFFFFFF
+        return out
+
     def resolve_bk_heap_descriptor(self):
         """
-        Guest address of the game heap's descriptor, or None.
+        Guest address of the GAME/LEVEL heap's descriptor, or None.
 
-        Prefers the largest heap that isn't the allocator's own control heap —
-        the control heap is full of allocator bookkeeping, not game data.  The
-        result is cached, since descriptors don't move once created.
+        This is the heap whose contents track the loaded map.  The process has
+        three:
+            0x40000000  XBLA shell — D3D shaders, menu UI      align 0x10
+            0x40220000  one dominant ~751KB buffer             align 0x10
+            0x41A90000  game/level data                        align 0x20
+        Only the last is of interest here.  It has been at 0x41A90000 in every
+        session observed, so that is tried first; the fallback prefers the
+        coarser 0x20 alignment, which is what distinguishes it from the
+        allocator's own heaps.
+
+        Do not substitute "largest" — this heap legitimately drops to 8 nodes at
+        the XBLA menu while the shell heap holds 650.
         """
         if self._bk_desc_guest is not None:
             if self.read_bk_heap_descriptor(self._bk_desc_guest):
@@ -1557,10 +1785,39 @@ class XeniaMemoryReader:
         if not candidates:
             return None
 
-        game = [d for d in candidates if d["base"] != XENIA_BK_ROOT_GUEST]
-        chosen = (game or candidates)[0]
+        chosen = next((d for d in candidates
+                       if d["guest"] == XENIA_BK_DESC_GUEST), None)
+        if chosen is None:
+            game = [d for d in candidates if d["base"] != XENIA_BK_ROOT_GUEST]
+            game.sort(key=lambda d: (d["alignment"], d["size"]), reverse=True)
+            chosen = (game or candidates)[0]
+
         self._bk_desc_guest = chosen["guest"]
         return self._bk_desc_guest
+
+    def list_bk_heaps(self, refresh=False):
+        """Guest addresses of every heap descriptor, cached across refreshes."""
+        if refresh or not self._bk_desc_list:
+            descs = self.find_bk_heap_descriptors()
+            # Sort by heap base so the concatenated walk comes out in address
+            # order, which is what the heap view's address bar assumes.
+            self._bk_desc_list = [d["guest"]
+                                  for d in sorted(descs, key=lambda d: d["base"])]
+        return self._bk_desc_list
+
+    def walk_all_bk_heaps(self):
+        """
+        Walk every heap and return the blocks concatenated in address order.
+
+        The game spreads its allocations across several heaps, so walking only
+        one shows a fraction of what is live — and not a predictable fraction,
+        since which heap is busiest changes with game state.
+        """
+        blocks = []
+        for guest in self.list_bk_heaps():
+            blocks.extend(self._walk_heap_bk(guest))
+        blocks.sort(key=lambda b: b["addr"])
+        return blocks
 
     def debug_bk_heap(self):
         """Human-readable report of what the BK heap walker can see."""
@@ -1570,10 +1827,13 @@ class XeniaMemoryReader:
         if self._phys_base is None:
             out.append("phys_base    = None  -> not connected, nothing else can work")
             return "\n".join(out)
+        detected = self._phys_base
+        self.confirm_bk_host_base()      # may correct _phys_base — do it first
         out.append("phys_base    = 0x%016X%s"
                    % (self._phys_base,
-                      "" if self._phys_base == XENIA_PHYS_BASE
-                      else "   <-- NOT the canonical 0x100000000"))
+                      "" if detected == self._phys_base
+                      else "   (corrected from 0x%016X, which reads as zeroes)"
+                           % detected))
 
         # Dump the descriptor slot under every candidate base.  Exactly one
         # should show the FFEEFFEE magic; if none does, the descriptor really
@@ -1583,6 +1843,9 @@ class XeniaMemoryReader:
             out.append("base 0x%011X + 0x%08X -> %s"
                        % (base, XENIA_BK_DESC_GUEST,
                           raw.hex(" ") if raw else "UNREADABLE"))
+        # Confirm the base BEFORE reading anything else, or the root and region
+        # reads below go to the wrong address and report as empty.
+        self.confirm_bk_host_base()
         out.append("host_base    = %s"
                    % ("0x%011X" % self._bk_host_base if self._bk_host_base else "unconfirmed"))
 
@@ -1596,27 +1859,47 @@ class XeniaMemoryReader:
                           struct.unpack_from(">I", root, 4)[0],
                           struct.unpack_from(">I", root, 0x10)[0]))
 
-        descs = self.find_bk_heap_descriptors()
+        # Deep scan here: the whole point of this dump is to find heaps the
+        # normal path might be skipping.
+        descs = self.find_bk_heap_descriptors(deep=True)
         if not descs:
             out.append("no heap descriptors found")
+        out.append("heaps found: %d" % len(descs))
         for d in descs:
-            out.append("desc @ 0x%08X  base=0x%08X end=0x%08X (0x%X bytes) "
-                       "first=0x%08X tail=0x%08X align=0x%X free=0x%X n=%d/%d"
+            blocks = self._walk_heap_bk(d["guest"])
+            used   = sum(b["chunk_size"] for b in blocks
+                         if b["state"] == HEAP_STATE_USED)
+            bad    = [b for b in blocks if b["xenia_errors"]]
+            out.append("  desc @0x%08X base=0x%08X end=0x%08X (0x%-8X) "
+                       "align=0x%-4X free=0x%-8X n=%d/%d "
+                       "-> %d nodes, 0x%X used, %d flagged"
                        % (d["guest"], d["base"], d["end"], d["size"],
-                          d["first"], d["tail"], d["alignment"], d["free_bytes"],
-                          d["count_a"], d["count_b"]))
+                          d["alignment"], d["free_bytes"],
+                          d["count_a"], d["count_b"],
+                          len(blocks), used, len(bad)))
+
+            # Free regions belong to a per-heap list at descriptor+0x38.
+            regions = self.read_bk_region_records(d["regions"])
+            walked  = blocks[-1]["xenia_guest"] + (blocks[-1]["next"]
+                                                   - blocks[-1]["addr"]) \
+                      if blocks else d["base"]
+            accounted = (walked - d["base"]) + sum(r[2] for r in regions)
+            out.append("     regions @0x%08X: %d, chain ends 0x%08X, "
+                       "accounted 0x%X of 0x%X%s"
+                       % (d["regions"], len(regions), walked,
+                          accounted, d["size"],
+                          "" if accounted == d["size"]
+                          else "   <-- 0x%X unaccounted" % (d["size"] - accounted)))
+            for rec, base, size, rflags in regions:
+                out.append("       @0x%08X base=0x%08X size=0x%-8X flags=0x%08X"
+                           % (rec, base, size, rflags))
+            for b in bad[:4]:
+                out.append("       flagged 0x%08X: %s"
+                           % (b["xenia_guest"], "; ".join(b["xenia_errors"])))
 
         chosen = self.resolve_bk_heap_descriptor()
-        out.append("chosen = %s" % ("0x%08X" % chosen if chosen else "None"))
-        if chosen is not None:
-            blocks = self._walk_heap_bk()
-            out.append("walked %d nodes" % len(blocks))
-            for b in blocks[:8]:
-                out.append("  0x%08X span=0x%-8X state=%d %s"
-                           % (b["xenia_guest"], b["next"] - b["addr"], b["state"],
-                              ",".join(b["xenia_errors"]) or "ok"))
-            bad = [b for b in blocks if b["xenia_errors"]]
-            out.append("%d nodes with errors" % len(bad))
+        out.append("chosen (game/level heap) = %s"
+                   % ("0x%08X" % chosen if chosen else "None"))
         return "\n".join(out)
 
     def _walk_heap_bk(self, desc_guest=None):
@@ -1661,14 +1944,18 @@ class XeniaMemoryReader:
         blocks      = []
         guest       = desc_guest
         prev_size16 = 0          # the descriptor's own prev_size16 is 0
+        stop_reason = "hit XENIA_BK_MAX_NODES (%d)" % XENIA_BK_MAX_NODES
 
         while len(blocks) < XENIA_BK_MAX_NODES:
             if guest >= heap_end:
+                stop_reason = "reached heap end 0x%08X" % heap_end
                 break
 
             host = self._bk_host(guest)
             data = self._read_raw(host, hdr_sz)
             if not data or len(data) < hdr_sz:
+                stop_reason = ("cannot read header at 0x%08X (uncommitted?)"
+                               % guest)
                 break
 
             size16    = struct.unpack_from(">H", data, XENIA_BK_SIZE16_OFF)[0]
@@ -1681,6 +1968,7 @@ class XeniaMemoryReader:
 
             # A zero span would loop forever.
             if size16 == 0:
+                stop_reason = "size16 == 0 at 0x%08X" % guest
                 break
 
             node_span = size16 * XENIA_BK_GRANULARITY
@@ -1719,10 +2007,27 @@ class XeniaMemoryReader:
                 prev_size16 = None
                 continue
 
+            page_end = bool(flags & XENIA_BK_FLAG_PAGE_END)
+            # Only a page-end node can be the last one, but most are not — so
+            # confirm by looking for a real header immediately after it.
+            next_why = (self._bk_probe_next(guest + node_span, heap_end, size16)
+                        if page_end else None)
+            is_last  = page_end and next_why is not None
+
             if is_desc:
                 # Descriptors have no payload; their span is header-only.
                 hdr_bytes  = node_span
                 chunk_size = 0
+                state      = HEAP_STATE_PERM
+            elif is_last and (flags & XENIA_BK_FLAG_ALLOCATED) \
+                    and node_span < XENIA_BK_OVERHEAD:
+                # (see _bk_node_follows: is_last is verified, not assumed)
+                # Degenerate boundary node: marked allocated but too small to
+                # hold a tracked payload.  Nothing sensible to report, so call
+                # it structural rather than invent a size or raise an error.
+                hdr_bytes  = node_span
+                chunk_size = 0
+                data_size  = 0
                 state      = HEAP_STATE_PERM
             elif is_free:
                 # data_size is stale on a freed node — whatever it held before
@@ -1749,19 +2054,10 @@ class XeniaMemoryReader:
                     # nibble only pins down the request modulo 0x10.  Report the
                     # capacity rather than guess.
                     data_size = chunk_size
-            elif node_span < XENIA_BK_OVERHEAD:
-                # A tracked node too small to hold its own payload is the
-                # terminator that closes the allocated run — it butts up against
-                # the region the allocator tracks as free rather than as nodes.
-                # Not an error, so don't report it as one.
-                hdr_bytes  = node_span
-                chunk_size = 0
-                data_size  = 0
-                state      = HEAP_STATE_PERM
             else:
                 # Tracked allocation: 0x50 tracking block after the base header.
                 hdr_bytes  = XENIA_BK_HDR_SIZE
-                chunk_size = node_span - XENIA_BK_OVERHEAD
+                chunk_size = max(0, node_span - XENIA_BK_OVERHEAD)
                 state      = HEAP_STATE_USED
                 # data_size is the size originally requested.  What capacity is
                 # allowed to be depends on the exact-fit bit: equal to the
@@ -1803,6 +2099,8 @@ class XeniaMemoryReader:
                 "xenia_tracked":  is_tracked,
                 "xenia_pad":      pad,
                 "xenia_exact":    is_exact,
+                "xenia_last":     is_last,
+                "xenia_page_end": page_end,
                 "xenia_size16":   size16,
                 "xenia_prev16":   prev16,
                 "xenia_flags":    flags,
@@ -1820,12 +2118,19 @@ class XeniaMemoryReader:
             }
             blocks.append(block)
 
+            if is_last:
+                # Page-boundary node with nothing valid after it.  Everything
+                # past here is managed as free regions rather than as nodes.
+                stop_reason = "after page-end block at 0x%08X: %s" % (guest, next_why)
+                break
+
             if fatal:
                 # We no longer know where the next header is.  Rather than end
                 # the walk (which hides everything downstream), hunt forward for
                 # the next node that proves itself with a valid self-pointer.
                 resync = self._bk_resync(guest + XENIA_BK_GRANULARITY, heap_end)
                 if resync is None:
+                    stop_reason = "resync found no further node after 0x%08X" % guest
                     break
                 errors.append("resynced to 0x%08X" % resync)
                 guest       = resync
@@ -1834,6 +2139,16 @@ class XeniaMemoryReader:
 
             prev_size16 = size16
             guest      += node_span
+
+        # Record why the walk ended on the final block.  "Why did it stop here?"
+        # is otherwise unanswerable from a dump alone, and the answer is the
+        # difference between a heap that really is small and a walker bug.
+        if blocks:
+            end_guest = blocks[-1]["xenia_guest"] + (blocks[-1]["next"]
+                                                    - blocks[-1]["addr"])
+            blocks[-1]["xenia_stop_reason"] = stop_reason
+            blocks[-1]["xenia_errors"] = list(blocks[-1]["xenia_errors"]) + [
+                "walk ended at 0x%08X: %s" % (end_guest, stop_reason)]
 
         return blocks
 
@@ -1858,6 +2173,8 @@ class XeniaMemoryReader:
             "xenia_tracked":  False,
             "xenia_pad":      0,
             "xenia_exact":    False,
+            "xenia_last":     False,
+            "xenia_page_end": False,
             "xenia_size16":   0,
             "xenia_prev16":   prev_size16 or 0,
             "xenia_flags":    0,
@@ -1867,6 +2184,53 @@ class XeniaMemoryReader:
             "xenia_bin":      None,
             "xenia_errors":   ["unparsed 0x%X bytes at 0x%08X" % (span, guest)],
         }
+
+    def _bk_probe_next(self, guest, heap_end, prev_size16):
+        """
+        Probe for a node header at `guest`.  Returns None if one is there, or a
+        string explaining what was found instead.
+
+        Used to decide whether a page-boundary node is genuinely the last one.
+        Accepts on any of the three independent signals a real header carries:
+        a back-link matching the node just walked, its own self-pointer, or the
+        descriptor magic.  One suffices — requiring all three would reject
+        untracked nodes, which have payload where the self-pointer would be.
+
+        The failure strings include the raw bytes on purpose.  "The walk stopped
+        here" is only actionable if you can tell an uncommitted page from a
+        header this function is wrongly rejecting.
+        """
+        if self._phys_base is None:
+            return "not connected"
+        if guest >= heap_end:
+            return "0x%08X is at/past heap end 0x%08X" % (guest, heap_end)
+
+        data = self._read_raw(self._bk_host(guest), XENIA_BK_HDR_READ)
+        if not data or len(data) < XENIA_BK_HDR_READ:
+            return "0x%08X unreadable — uncommitted, so the heap ends here" % guest
+
+        size16   = struct.unpack_from(">H", data, XENIA_BK_SIZE16_OFF)[0]
+        prev16   = struct.unpack_from(">H", data, XENIA_BK_PREVSIZE_OFF)[0]
+        self_low = struct.unpack_from(">I", data, XENIA_BK_SELF_OFF)[0]
+        head     = data[:16].hex(" ")
+
+        if size16 == 0:
+            return "0x%08X size16=0 [%s]" % (guest, head)
+        if guest + size16 * XENIA_BK_GRANULARITY > heap_end:
+            return ("0x%08X span 0x%X overruns heap end 0x%08X [%s]"
+                    % (guest, size16 * XENIA_BK_GRANULARITY, heap_end, head))
+
+        if (prev16 == prev_size16
+                or self_low == ((guest + XENIA_BK_SELF_OFF) & 0xFFFFFFFF)
+                or self_low == XENIA_BK_DESC_MAGIC):
+            return None
+
+        return ("0x%08X readable but no signal: prev16=%04X (want %04X), "
+                "self=%08X [%s]"
+                % (guest, prev16, prev_size16, self_low, head))
+
+    def _bk_node_follows(self, guest, heap_end, prev_size16):
+        return self._bk_probe_next(guest, heap_end, prev_size16) is None
 
     def _bk_resync(self, guest, heap_end, chunk=0x10000):
         """
