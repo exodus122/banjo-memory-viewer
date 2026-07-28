@@ -550,7 +550,7 @@ class HeapView(tk.Frame):
     # felt heavier than Xenia (whose builders read a handful of pointers).  The
     # tags only change when the game loads or frees things, so a short interval
     # is indistinguishable in practice.
-    _TAG_SCAN_INTERVAL = 0.5      # seconds
+    _TAG_SCAN_INTERVAL = 0.25      # seconds
 
     def _rebuild_tag_scan_cache(self, reader):
         pid = self._profile.id if self._profile is not None else ""

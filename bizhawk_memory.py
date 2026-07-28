@@ -425,7 +425,11 @@ class BizHawkMemoryReader:
             self.handle, ctypes.c_void_p(proc_addr),
             buf, size, ctypes.byref(n))
         if ok and n.value > 0:
-            return bytes(buf.raw[:n.value])
+            # buf.raw already copies; slicing it copies a second time, which at
+            # multi-megabyte bulk sizes is a real cost for no benefit.
+            if n.value == size:
+                return buf.raw
+            return buf.raw[:n.value]
         return None
 
     def _write_raw(self, proc_addr, data):
@@ -570,6 +574,22 @@ class BizHawkMemoryReader:
     # one-read-per-block path unchanged below.
     _HEAP_BULK_READ_CAP = 8 * 1024 * 1024
 
+    def _read_n64_bulk_raw(self, n64_addr, size):
+        """Bulk read WITHOUT undoing BizHawk's word swizzle.
+
+        For the heap walk, which touches 16 bytes per block out of a
+        multi-megabyte buffer, unswizzling the whole thing is pure waste — the
+        transform costs a full extra copy and byteswap of every megabyte read.
+        Callers must read through the swizzle themselves (see
+        _parse_heap_header's `swizzled` argument).  n64_addr must be 4-aligned.
+        """
+        if size <= 0:
+            return b""
+        proc_base = self._n64_to_proc(n64_addr)
+        if proc_base is None:
+            return None
+        return self._read_raw(proc_base, (size + 3) & ~3)
+
     def _read_n64_bulk_fast(self, n64_addr, size):
         """Like read_n64(), but for large 4-byte-aligned reads.
 
@@ -619,7 +639,9 @@ class BizHawkMemoryReader:
         bulk = None
         if 0 < p.heap_size <= self._HEAP_BULK_READ_CAP and (p.heap_start & 3) == 0:
             # + 0x1000 slack mirrors the walk loop's own boundary check below.
-            bulk = self._read_n64_bulk_fast(p.heap_start, p.heap_size + 0x1000)
+            # Raw (still swizzled): _parse_heap_header reads through the swizzle,
+            # which avoids byteswapping megabytes to use 16 bytes per block.
+            bulk = self._read_n64_bulk_raw(p.heap_start, p.heap_size + 0x1000)
 
         while addr >= p.heap_start and addr < heap_end + 0x1000 and len(blocks) < max_blocks:
             if addr in visited:
@@ -634,7 +656,8 @@ class BizHawkMemoryReader:
                 # the optional free-list fields) by falling back to one
                 # small live read just for those.
                 if 0 <= off and off + 0x10 <= len(bulk):
-                    block = self._parse_heap_header(bulk, off, addr)
+                    block = self._parse_heap_header(bulk, off, addr,
+                                                    swizzled=True)
             if block is None:
                 # Outside the bulk buffer (or no bulk buffer at all, e.g.
                 # Xenia's unbounded/huge heap_size) - fall back to the
@@ -654,7 +677,7 @@ class BizHawkMemoryReader:
 
         return blocks
 
-    def _parse_heap_header(self, data, off, addr):
+    def _parse_heap_header(self, data, off, addr, swizzled=False):
         """Parse one heap block header out of an already-fetched buffer.
 
         `off` is the byte offset within `data` corresponding to `addr`.
@@ -662,16 +685,38 @@ class BizHawkMemoryReader:
         free-list fields (prev_free/next_free, only present for free
         blocks), those are topped up with one small live read - same as
         the original single-read implementation did unconditionally.
+
+        `swizzled=True` means `data` is still in BizHawk's raw form, with the
+        bytes of each 4-byte word reversed.  Undoing that for the whole buffer
+        costs a copy and a byteswap of every megabyte read, to use 16 bytes per
+        block — so instead we read through the swizzle here:
+
+            big-endian u32 at an aligned offset in the UNSWIZZLED buffer
+            == little-endian u32 at the same offset in the RAW buffer
+
+        because reversing a word's bytes and then reading it big-endian is the
+        same as reading the original little-endian.  Individual bytes need the
+        ^3 flip.  Requires a 4-aligned buffer base and offset, hence the guard.
         """
         if off < 0 or off + 0x10 > len(data):
             return None
+        if swizzled and (off & 3):
+            return None      # caller must pass 4-aligned offsets
 
-        prev_ptr = struct.unpack_from(">I", data, off + 0x0)[0]
-        next_ptr = struct.unpack_from(">I", data, off + 0x4)[0]
-        b0 = data[off + 0xC]
-        b1 = data[off + 0xD]
-        b2 = data[off + 0xE]
-        b3 = data[off + 0xF]
+        if swizzled:
+            prev_ptr = struct.unpack_from("<I", data, off + 0x0)[0]
+            next_ptr = struct.unpack_from("<I", data, off + 0x4)[0]
+            b0 = data[(off + 0xC) ^ 3]
+            b1 = data[(off + 0xD) ^ 3]
+            b2 = data[(off + 0xE) ^ 3]
+            b3 = data[(off + 0xF) ^ 3]
+        else:
+            prev_ptr = struct.unpack_from(">I", data, off + 0x0)[0]
+            next_ptr = struct.unpack_from(">I", data, off + 0x4)[0]
+            b0 = data[off + 0xC]
+            b1 = data[off + 0xD]
+            b2 = data[off + 0xE]
+            b3 = data[off + 0xF]
 
         unused_bytes = b0 * 0x10000 + b1 * 0x100 + b2
         state = b3 >> 6
@@ -693,8 +738,9 @@ class BizHawkMemoryReader:
 
         if state == HEAP_STATE_EMPTY:
             if off + 0x18 <= len(data):
-                block["prev_free"] = struct.unpack_from(">I", data, off + 0x10)[0]
-                block["next_free"] = struct.unpack_from(">I", data, off + 0x14)[0]
+                fmt = "<I" if swizzled else ">I"
+                block["prev_free"] = struct.unpack_from(fmt, data, off + 0x10)[0]
+                block["next_free"] = struct.unpack_from(fmt, data, off + 0x14)[0]
             else:
                 extra = self.read_n64(addr + 0x10, 8)
                 if extra and len(extra) >= 8:
