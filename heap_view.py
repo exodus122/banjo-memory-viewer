@@ -2015,8 +2015,8 @@ class HeapView(tk.Frame):
         cache = []
         
         POINTER_TAGS = [
-            (0x1826A2BCC, "ActorArray",               "Actor Array",               ""),
             (0x1826A29A0, "Player Object",            "Player Object",             ""),
+            (0x1826A2BCC, "ActorArray",               "Actor Array",               ""),
         ]
         
         try:

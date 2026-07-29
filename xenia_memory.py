@@ -70,8 +70,17 @@ XENIA_MEM_SIZE      = 0x20000000   # 512 MB physical address space scanned
 #                  read as zero; on reused memory they hold whatever the
 #                  previous occupant left (floats, "SETT", "RANK", ...).  Do not
 #                  read anything into them.
-#     P+0x60  payload,  capacity == span - 0x60
+#     P+0x50  payload,  capacity == span - 0x60
+#             followed by a 0x10 trailer, so total overhead is 0x60
 #     and round_up(data_size, 0x10) == capacity
+#
+#     The payload offset is 0x50, NOT 0x60.  Span arithmetic cannot tell the
+#     two apart — 0x50 header + 0x10 trailer and a flat 0x60 header both leave
+#     0x60 of overhead — so this was originally guessed wrong.  What settles it
+#     is a pointer the game itself holds: the BK actor array pointer reads
+#     0x41B78330 for the node at 0x41B782E0, which is exactly P+0x50.
+#     Untracked nodes have no trailer (their payload fills span - 0x10 exactly,
+#     confirmed by a 0x600 payload holding exactly 32 records of 0x30).
 #
 #   UNTRACKED  anything else at P+0x10
 #     P+0x10  payload,  capacity == span - 0x10
@@ -122,8 +131,10 @@ XENIA_BK_CTRL_DESC_GUEST = 0x40000630  # allocator control heap (0x40000000..0x4
 XENIA_GAME_DESC_GUESSES  = (XENIA_BK_DESC_GUEST, XENIA_BT_DESC_GUEST)
 
 XENIA_BK_BASE_HDR      = 0x10          # base header every node has
-XENIA_BK_HDR_SIZE      = 0x60          # tracked node header; payload at P+0x60
-XENIA_BK_OVERHEAD      = 0x60          # span - round_up(data_size) when tracked
+XENIA_BK_TRACKED_HDR   = 0x50          # tracked node: payload at P+0x50
+XENIA_BK_TRACKED_TAIL  = 0x10          # ...followed by a 0x10 trailer
+XENIA_BK_OVERHEAD      = 0x60          # = TRACKED_HDR + TRACKED_TAIL
+XENIA_BK_HDR_SIZE      = 0x60          # legacy alias for the total overhead
 XENIA_BK_GRANULARITY   = 0x10          # unit of size16 / prev_size16
 XENIA_BK_HDR_READ      = 0x20          # bytes we must actually read per node;
                                        # a 0x20 free node is all the memory
@@ -256,7 +267,12 @@ XENIA_BK_PROFILE = GameProfile(
 
     overlay_names={},
     hex_regions={},
-    actor_array_pointers={},
+    # Static pointer holding the guest address of the live ActorArray.  It
+    # resolves to the tracked node's payload (P+0x50) — the same value the heap
+    # tagger matches — so actors_view can use it directly with no header offset.
+    actor_array_pointers={
+        "Actor Array": 0x18249F68C,
+    },
 )
 
 ALL_XENIA_PROFILES = [XENIA_BT_PROFILE, XENIA_BK_PROFILE]
@@ -1541,8 +1557,12 @@ class XeniaMemoryReader:
                     # capacity rather than guess.
                     data_size = chunk_size
             else:
-                # Tracked allocation: 0x50 tracking block after the base header.
-                hdr_bytes  = XENIA_BK_HDR_SIZE
+                # Tracked allocation: payload at P+0x50, with a 0x10 trailer
+                # after it.  Overhead is 0x60 either way, so span arithmetic
+                # cannot distinguish 0x50+trailer from a flat 0x60 header — the
+                # game's own pointer can, and does: the BK actor array pointer
+                # reads 0x41B78330 for the node at 0x41B782E0, i.e. P+0x50.
+                hdr_bytes  = XENIA_BK_TRACKED_HDR
                 chunk_size = max(0, node_span - XENIA_BK_OVERHEAD)
                 state      = HEAP_STATE_USED
                 # data_size is the size originally requested.  What capacity is
@@ -1998,6 +2018,58 @@ class XeniaMemoryReader:
         out.append("")
         out.append(self.debug_memory_accounting())
         return "\n".join(out)
+
+    def locate_pointer(self, addr):
+        """
+        Explain where an address lands: which heap, which block, and whether it
+        is exactly a block's payload start.
+
+        Tagging matches a pointer against block payload starts, so when a tag
+        does not appear the question is always one of: is the pointer garbage,
+        is it in a heap we are not walking, or is it mid-block rather than at a
+        payload start?  This answers all three.
+
+        `addr` may be a host address or a guest address.
+        """
+        self.confirm_bk_host_base()
+        base = (self._bk_host_base if self._bk_host_base is not None
+                else (self._phys_base or XENIA_PHYS_BASE))
+        guest = (addr - base) if addr >= base else addr
+        guest &= 0xFFFFFFFF
+
+        lines = ["pointer 0x%08X (host 0x%X)" % (guest, base + guest)]
+        if guest == 0:
+            lines.append("  NULL — the pointer read returned 0")
+            return "\n".join(lines)
+
+        for desc_guest in self.list_bk_heaps():
+            d = self.read_bk_heap_descriptor(desc_guest)
+            if not d or not (d["base"] <= guest < d["end"]):
+                continue
+            lines.append("  inside heap 0x%08X (base 0x%08X end 0x%08X, align 0x%X)"
+                         % (desc_guest, d["base"], d["end"], d["alignment"]))
+            for b in self._walk_heap_bk(desc_guest):
+                lo = b["xenia_guest"]
+                hi = lo + (b["next"] - b["addr"])
+                if not (lo <= guest < hi):
+                    continue
+                hdr = b.get("xenia_hdr_size", 0)
+                payload = lo + hdr
+                lines.append("  block 0x%08X span 0x%X state=%d hdr=0x%X"
+                             % (lo, hi - lo, b["state"], hdr))
+                if guest == payload:
+                    lines.append("  == payload start, so tagging SHOULD match")
+                else:
+                    lines.append("  payload starts 0x%08X — pointer is +0x%X "
+                                 "into it, so an exact-match tag will NOT fire"
+                                 % (payload, guest - payload))
+                return "\n".join(lines)
+            lines.append("  no block contains it (inside the heap but unwalked)")
+            return "\n".join(lines)
+
+        lines.append("  not inside any heap we walk — check the other heaps "
+                     "via the Heap dropdown, or it is not heap memory")
+        return "\n".join(lines)
 
     def debug_memory_accounting(self):
         """Committed guest memory vs. what the known heaps explain."""

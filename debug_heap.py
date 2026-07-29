@@ -47,6 +47,18 @@ def main():
 
     lines = [reader.debug_bk_heap()]
 
+    # Why isn't the actor array tagged?  Read the pointer the tagger uses and
+    # report exactly where it lands.
+    ACTOR_ARRAY_PTR = 0x18249F68C      # matches _build_bk_xenia_tag_scan_cache
+    lines.append("")
+    lines.append("=== actor array pointer ===")
+    raw = reader.read_u32_be(ACTOR_ARRAY_PTR)
+    lines.append("read_u32_be(0x%X) = %s"
+                 % (ACTOR_ARRAY_PTR,
+                    "0x%08X" % raw if raw is not None else "None (read failed)"))
+    if raw:
+        lines.append(reader.locate_pointer(raw))
+
     # Try to put names to allocations by following pointers out of payloads.
     for desc in reader.list_bk_heaps(refresh=True):
         d = reader.read_bk_heap_descriptor(desc)

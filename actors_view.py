@@ -89,10 +89,10 @@ _BK_LAYOUT = dict(
     off_state_word  = 0x10,
     state_shift     = 26,
     state_mask      = 0xFC000000,
-    off_despawn_word = 0x44,
+    off_despawn_word = None, #0x44,
     despawn_shift   = 3,
     despawn_mask    = 0x8,
-    off_init_word   = 0xF4,
+    off_init_word   = None, #0xF4,
     init_shift      = 12,
     init_mask       = 0x1000,
     read_marker     = True,
@@ -146,7 +146,35 @@ _BT_LAYOUT = dict(
     mkr_read_size   = 0x20,       # only need up to 0x16 + some slack
 )
 
-GAME_LAYOUTS = {"bk": _BK_LAYOUT, "bt": _BT_LAYOUT, "xenia_bk": _BK_LAYOUT, "xenia_bt": _BT_LAYOUT}
+# The XBLA port's Actor struct is 0x184 bytes, 4 more than the N64's 0x180, and
+# the extra word sits mid-struct rather than at the end: marker_ptr, pos and the
+# state word all read correctly, while yaw/pitch/roll/scale do not.
+#
+# Whether the word was inserted at 0x40 or at 0x44 cannot be told apart from the
+# data, but it does not matter — no field sits at 0x40, so under either reading
+# everything from 0x44 onward moves +4 and everything below it stays put.
+#
+# Offsets are therefore listed explicitly rather than derived, so a future edit
+# to _BK_LAYOUT can't silently half-apply here.
+_XENIA_BK_LAYOUT = dict(
+    _BK_LAYOUT,
+    actor_size       = 0x184,
+    # unchanged (below the inserted word):
+    #   off_marker_ptr 0x00, off_pos 0x04, off_state_word 0x10
+    off_despawn_word = None, #0x48,      # N64 0x44
+    off_yaw          = 0x54,      # N64 0x50
+    off_pitch        = 0x6C,      # N64 0x68
+    off_init_word    = None, #0xF8,      # N64 0xF4
+    off_roll         = 0x114,     # N64 0x110
+    off_scale        = 0x12C,     # N64 0x128
+)
+
+GAME_LAYOUTS = {
+    "bk":       _BK_LAYOUT,
+    "bt":       _BT_LAYOUT,
+    "xenia_bk": _XENIA_BK_LAYOUT,
+    "xenia_bt": _BT_LAYOUT,
+}
 
 # ── Column definitions ─────────────────────────────────────────────────────────
 # (id, label, width, anchor, stretch)
