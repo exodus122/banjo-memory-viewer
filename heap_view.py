@@ -211,8 +211,18 @@ class HeapView(tk.Frame):
 
     # Tag types whose label can change between frames even when addr/state/size
     # are identical — always re-tagged, never frozen in cache.
+    # Types whose tag is recomputed every refresh even when the memo has an
+    # entry, because the thing they name can change without the block's
+    # address/state/size changing.  The Xenia pointer-table types belong here:
+    # their tables are live, and several hold double-buffered pointers that
+    # swap between frames.
     _DYNAMIC_TYPES = frozenset({"asset", "ParticleEmitter", "ParticleEmitter *", "unknown",
-                                 "ActorArray", "Player Object"})
+                                 "ActorArray", "Player Object",
+                                 "assetCache", "PtrArray", "BufTable", "ObjTable",
+                                 "HeapPtrs", "HeapPtrs2", "HeapPtrs3", "HeapPtrs4",
+                                 "RecTable", "SlabPtrs", "SlabPtrs2", "SlabPtrs3",
+                                 "BufPtrs", "ActiveBuf", "ActiveHeap", "MixPtrs",
+                                 "OtherPtrs", "OtherPtrs2", "OtherPtrs3"})
 
     # Heap bar zoom (mouse wheel over the bar): multiplicative zoom per
     # wheel notch, and the deepest allowed zoom expressed as a fraction of
@@ -617,6 +627,15 @@ class HeapView(tk.Frame):
             key = (ptr, self._xenia_ptr_header_size(ptr))
             if key not in index:
                 index[key] = (btype, label, source)
+
+        # _tag_cache memoises tag_block() by (addr, state, chunk_size,
+        # used_size), and every answer it holds was derived from this index.  So
+        # when the index changes the memo is stale by definition — without this,
+        # an asset name from one area survives into the next whenever a slab is
+        # reused at the same address and size, which is the common case.
+        if index != self._tag_scan_index:
+            self._tag_cache.clear()
+
         self._tag_scan_index = index
         self._tag_scan_ts = time.time()
         self._tag_scan_pid = pid
