@@ -584,21 +584,50 @@ class HeapView(tk.Frame):
             return "" if name == "?" else name
         return ""
 
-    @staticmethod
-    def _xenia_ptr_header_size(ptr_host):
-        """
-        Which node shape a cached pointer refers to.
+    # ── Payload offset ────────────────────────────────────────────────────────
+    #
+    # Tagging matches a block against a pointer by comparing the block's PAYLOAD
+    # address to it, so both sides must agree on where a payload starts.  The
+    # two functions below are that agreement and are the only places the rule
+    # lives.  It used to be duplicated in three spots, and when they drifted
+    # apart nothing matched and every tag silently vanished — no error, just an
+    # empty column.
+    #
+    #   N64 (bk/bt)      payload = addr + 0x10
+    #   Xenia allocator  tracked  -> addr + 0x50, untracked -> addr + 0x10
+    #                    (the walker records which in xenia_hdr_size)
+    #   Xenia slab       payload = addr + 0x40
 
-        No memory read needed: the pointers all came from scans that already
-        validated their targets, and the two families live in disjoint address
-        ranges.  Slab payloads are node + 0x40 down in low guest memory;
-        allocator-heap pointers were only accepted when the node proved itself
-        as TRACKED, whose payload is P + 0x50.  Untracked nodes (payload
-        P + 0x10) are never the target of one of these tables, so a block of
-        that shape correctly matches nothing.
+    def _block_header_size(self, block):
+        """Payload offset for a walked block."""
+        if self._profile is not None and self._profile.id in ("bk", "bt"):
+            return 0x10
+        if "xenia_hdr_size" in block:
+            return block["xenia_hdr_size"]
+        return 0x40
+
+    def _tag_key_header_size(self, ptr_host):
         """
+        Payload offset implied by a cached POINTER — the same rule as
+        _block_header_size, applied from the other direction.
+
+        Must stay profile-aware.  An earlier version applied the Xenia rule
+        unconditionally, and for an N64 pointer like 0x8012A400 the guest
+        subtraction goes negative, lands in the low-address branch and yields
+        0x40 while blocks were keyed 0x10, which broke every BizHawk tag.
+
+        For Xenia no memory read is needed: these pointers came from scans that
+        already validated their targets, and the two families occupy disjoint
+        ranges.  Slab payloads are node + 0x40 in low guest memory; allocator
+        pointers were only accepted when the node proved itself TRACKED, whose
+        payload is P + 0x50.  Untracked nodes (payload P + 0x10) are never a
+        table target, so blocks of that shape correctly match nothing.
+        """
+        pid = self._profile.id if self._profile is not None else ""
+        if pid in ("bk", "bt"):
+            return 0x10
         guest = ptr_host - 0x100000000
-        return 0x40 if guest < 0x01000000 else 0x50
+        return 0x40 if 0 <= guest < 0x01000000 else 0x50
 
     def _rebuild_tag_scan_cache(self, reader):
         pid = self._profile.id if self._profile is not None else ""
@@ -624,7 +653,7 @@ class HeapView(tk.Frame):
         for ptr, btype, label, source in self._tag_scan_cache:
             if not ptr:
                 continue
-            key = (ptr, self._xenia_ptr_header_size(ptr))
+            key = (ptr, self._tag_key_header_size(ptr))
             if key not in index:
                 index[key] = (btype, label, source)
 
@@ -2221,18 +2250,7 @@ class HeapView(tk.Frame):
         
     def tag_block(self, block, reader):
         def contains(ptr):
-            if self._profile.id in ("bk", "bt"):
-                header_size = 0x10
-            elif "xenia_hdr_size" in block:
-                # Xenia allocator nodes come in two shapes: tracked (0x60
-                # header) and untracked (0x10).  The walker records which, so
-                # use that rather than assuming one size for the whole heap.
-                # Both Kazooie and Tooie use this allocator.
-                header_size = block["xenia_hdr_size"]
-            else:
-                header_size = 0x40
-
-            return ptr and (block["addr"] + header_size) == ptr
+            return ptr and (block["addr"] + self._block_header_size(block)) == ptr
 
         try:
             if block["state"] == HEAP_STATE_EMPTY:
@@ -2254,15 +2272,10 @@ class HeapView(tk.Frame):
             # dict built alongside that list: the cache runs to thousands of
             # entries and the heap to thousands of blocks, so scanning it per
             # block was millions of comparisons per refresh.
-            if self._profile.id in ("bk", "bt"):
-                header_size = 0x10
-            elif "xenia_hdr_size" in block:
-                header_size = block["xenia_hdr_size"]
-            else:
-                header_size = 0x40
             # Keyed on (payload, header size): see _rebuild_tag_scan_cache.
             # Without the header size in the key, one pointer matches every
             # block whose payload lands on it under ANY of the three shapes.
+            header_size = self._block_header_size(block)
             hit = self._tag_scan_index.get((block["addr"] + header_size,
                                             header_size))
             if hit is not None:
