@@ -749,20 +749,37 @@ class HeapView(tk.Frame):
     # ── Summary / bar ─────────────────────────────────────────────────────────
 
     def _refresh_summary(self, blocks):
+        # profile.heap_size is 0 for every Xenia profile — their bounds come
+        # from the heap descriptor at walk time, not from the profile — so TOTAL
+        # always read 0.  Fall back to the range the blocks actually cover,
+        # which is the same figure the bar scales itself to.
         heap_size = self._profile.heap_size if self._profile else HEAP_SIZE
-        free_kb = used_kb = perm_kb = n_free = 0
+        if not heap_size:
+            _, heap_size = self._full_heap_range()   # may still be None
+        heap_size = heap_size or 0
+
+        free_kb = used_kb = perm_kb = n_free = slack = 0
         for b in blocks:
             s, sz = b["state"], b["chunk_size"]
             if   s == HEAP_STATE_EMPTY: free_kb += sz; n_free += 1
-            elif s == HEAP_STATE_USED:  used_kb += sz
+            elif s == HEAP_STATE_USED:
+                used_kb += sz
+                slack   += max(0, sz - b.get("used_size", sz))
             elif s == HEAP_STATE_PERM:  perm_kb += sz
-        self._summary_var.set(
-            f"  {len(blocks)} blocks   "
-            f"FREE {free_kb/1024:.1f} KB ({n_free} frags)   "
-            f"USED {used_kb/1024:.1f} KB   "
-            f"PERM {perm_kb/1024:.1f} KB   "
-            f"TOTAL {heap_size/1024:.0f} KB"
-        )
+
+        text = (f"  {len(blocks)} blocks   "
+                f"FREE {free_kb/1024:.1f} KB ({n_free} frags)   "
+                f"USED {used_kb/1024:.1f} KB   "
+                f"PERM {perm_kb/1024:.1f} KB   ")
+
+        # A slab heap claims every slab it touches, so FREE is always 0 and
+        # says nothing.  What matters there is how much of each 0x10000 slab is
+        # unused — often a third to a half of the whole heap.
+        if any(b.get("xenia_heap") == "slab" for b in blocks):
+            text += f"SLACK {slack/1024:.1f} KB   "
+
+        text += f"TOTAL {heap_size/1024:.0f} KB"
+        self._summary_var.set(text)
 
     def _full_heap_range(self):
         """(heap_start, heap_size) for the whole heap, regardless of the

@@ -13,16 +13,35 @@ three heaps, each described by a 0x50-byte descriptor carrying 0xFFEEFFEE.
     guest 0x40000000  allocator root + bin table, and the shell heap
                       (D3D shaders, XBLA menu)             align 0x10
     guest 0x40220000  one dominant ~751KB buffer           align 0x10
-    game heap         level/asset data, address varies     align 0x20
-                      (BK: 0x41A90000, BT: 0x40320000)
-
-Alignment 0x20 is what distinguishes the game heap from the allocator's own two.
+    0x20-aligned      BK: 0x41A90000    BT: 0x40320000     align 0x20
 
 Banjo-Tooie additionally has an unrelated SLAB heap at guest 0x70000: fixed
-0x10000 stride, 0x40-byte header, 0xDEDEDEDE footer.  It holds the large asset
-buffers (the actor array lives there) and is walked separately by
-_walk_heap_bt().  No amount of scanning for 0xFFEEFFEE would ever find it — a
-reminder that "all the heaps we can find" is not "all the heaps".
+0x10000 stride, 0x40-byte header, 0xDEDEDEDE footer.  No amount of scanning for
+0xFFEEFFEE would ever find it — a reminder that "all the heaps we can find" is
+not "all the heaps".
+
+WHICH HEAP HOLDS THE GAME depends on the title, and the two are not analogous:
+
+  Kazooie has no slab heap, so its 0x20-aligned heap IS the game/level heap —
+  ActorArray, level assets, everything that churns with the map.
+
+  Tooie SPLITS its game data by size.  Large objects go in the SLAB heap
+  (ActorArray, Player Object, BoneTransformLists, the 0x21DC0/0x4A380 asset
+  buffers) — 0x10000 granularity makes that ruinous for anything small, so a
+  0x1258 ActorArray still occupies a full 0x10000 slab.  Small objects go in
+  the two non-shell FFEEFFEE heaps instead, as ordinary tracked nodes.
+
+  Static pointers in the XEX confirm the split: scanning 0x1826A0000-0x1826B0000
+  found 4 pointers to slab payloads (node + 0x40) and 9 to tracked heap nodes
+  (P + 0x50) — six into 0x40220000 and three into 0x40320000, none into the
+  shell heap at 0x40000000.
+
+A WARNING ABOUT THE TEXT SURVEY: it reports strings found in payloads, which
+only exist in allocations that contain strings.  A heap holding 300 game
+objects and 5 menu strings surveys as "menu".  Tooie's 0x40220000 and
+0x40320000 heaps were mislabelled that way ("Menu/UI", "Shader src") until
+pointer scanning showed both are mixed.  Treat survey text as evidence of what
+is present, never of what predominates.
 
 Heap format details are documented on the constants below.
 """
@@ -665,25 +684,42 @@ class XeniaMemoryReader:
             d = self.read_bk_heap_descriptor(guest)
             if d:
                 descs.append(d)
-        # Alignment 0x20 marks the game heap; the allocator's own heaps use 0x10.
+        # Alignment 0x20 marks the largest/primary heap; the allocator's own
+        # heaps use 0x10.
         descs.sort(key=lambda d: (d["alignment"], d["size"]), reverse=True)
+
+        # Which heap holds the actual game objects differs between the games.
+        #
+        # Kazooie has no slab heap, so its 0x20-aligned allocator heap IS the
+        # game/level heap — ActorArray, level assets, the lot.
+        #
+        # Tooie keeps game objects in its slab heap instead, and its 0x20-aligned
+        # heap holds the Xbox-side wrapper: one ~770KB engine buffer (a near
+        # identical allocation exists in Kazooie's Buffer heap) plus hundreds of
+        # 0x20-span handle nodes, each holding a pointer to the payload of the
+        # allocation right after it, pointing back in turn.  That is C++ object
+        # bookkeeping, not level data — so calling it "Game" was misleading.
+        is_bt = (self.profile.id == "xenia_bt")
 
         for d in descs:
             if d["alignment"] == 0x20:
-                role = "Game"
+                role = "Objects+shaders" if is_bt else "Game"
             elif d["base"] == XENIA_BK_ROOT_GUEST:
-                role = "Shell"
+                # The one heap no game pointer has been seen to reference:
+                # compiled shader objects and a TrueType font (xarialuni.ttf,
+                # with cmap/glyf/hhea tables) across ~975 tiny allocations.
+                role = "Shaders/font"
             else:
-                role = "Buffer"
+                role = "Objects+UI" if is_bt else "Buffer"
             out.append(("0x%08X" % d["guest"],
                         "%s  0x%08X  (%d KB)"
                         % (role, d["guest"], d["size"] // 1024)))
 
-        if self.profile.id == "xenia_bt":
-            # First, and the default (see default_heap_key): Tooie's assets and
-            # its actor array live here, so it is what you almost always want
-            # open.  The allocator heaps stay available below it.
-            out.insert(0, (self.SLAB_HEAP_KEY, "Assets Slab  0x70000  "))
+        if is_bt:
+            # First, and the default (see default_heap_key): this is Tooie's
+            # real game heap — ActorArray, Player Object, BoneTransformLists and
+            # the big asset buffers all live here.
+            out.insert(0, (self.SLAB_HEAP_KEY, "Game / assets  slab 0x70000"))
 
         if len(out) > 1:
             out.append((self.ALL_HEAPS_KEY, "All heaps"))
@@ -700,11 +736,13 @@ class XeniaMemoryReader:
 
     def default_heap_key(self):
         """
-        Which heap to show when the user hasn't chosen one.
+        Which heap to show when the user hasn't chosen one: the one holding
+        game objects.
 
-        Tooie defaults to the slab heap (assets and the actor array); Kazooie
-        to its game/level heap.  The UI reads this too, so the dropdown always
-        shows the heap actually being walked rather than assuming index 0.
+        For Tooie that is the slab heap; for Kazooie, which has no slab heap,
+        it is the 0x20-aligned allocator heap.  The UI reads this too, so the
+        dropdown always names the heap actually being walked rather than
+        assuming index 0.
         """
         if self.profile.id == "xenia_bt":
             return self.SLAB_HEAP_KEY
@@ -767,7 +805,7 @@ class XeniaMemoryReader:
         footer_sz = XENIA_BT_FOOTER_SIZE
 
         blocks = []
-        guest  = (XENIA_BT_HEAP_START - XENIA_PHYS_BASE) & 0xFFFFFFFF
+        guest  = self.find_bt_slab_start()
         misses = 0
         stop_reason = "hit XENIA_BT_MAX_NODES (%d)" % XENIA_BT_MAX_NODES
 
@@ -834,6 +872,82 @@ class XeniaMemoryReader:
         for b in blocks:
             b["xenia_heap"] = "slab"
         return blocks
+
+    def find_bt_slab_start(self, lo=0x00010000, hi=0x00100000):
+        """
+        First slab in the BT slab heap, found rather than assumed.
+
+        XENIA_BT_HEAP_START was an observed constant (guest 0x70000), but the
+        memory accounting shows committed pages BELOW it — so starting there can
+        silently skip real slabs.  A slab proves itself twice: its first word is
+        its own guest address, and 0xDEDEDEDE sits at 0x40 + data_len.  Two
+        independent checks make a false positive implausible.
+        """
+        base = (self._bk_host_base if self._bk_host_base is not None
+                else (self._phys_base or XENIA_PHYS_BASE))
+        fallback = (XENIA_BT_HEAP_START - XENIA_PHYS_BASE) & 0xFFFFFFFF
+
+        guest = lo & ~(XENIA_BT_SLAB_STRIDE - 1)
+        while guest < hi:
+            data = self._read_raw(base + guest, XENIA_BT_HDR_SIZE)
+            if data and len(data) >= 8:
+                self_low, data_len = struct.unpack_from(">II", data, 0)
+                if self_low == guest and 0 < data_len <= XENIA_MEM_SIZE:
+                    foot = self._read_raw(base + guest + XENIA_BT_HDR_SIZE
+                                          + data_len, 4)
+                    if foot and len(foot) == 4 and \
+                            struct.unpack_from(">I", foot, 0)[0] == XENIA_BT_FOOTER_MARK:
+                        return guest
+            guest += XENIA_BT_SLAB_STRIDE
+        return fallback
+
+    def probe_bt_slab_granularity(self, step=0x100, limit=4000):
+        """
+        Look for slab headers the 0x10000 stride would step over.
+
+        A slab proves itself twice — first word == its own guest address, and
+        0xDEDEDEDE at 0x40 + data_len — so scanning at a finer granularity and
+        counting the hits answers "is the stride too coarse" directly, rather
+        than by inference.  If every hit is 0x10000-aligned the stride is right
+        and a low node count is structural, not a walker bug.
+
+        Returns (hits, aligned, misaligned_samples).
+        """
+        base = (self._bk_host_base if self._bk_host_base is not None
+                else (self._phys_base or XENIA_PHYS_BASE))
+        blocks = self._walk_heap_bt()
+        if not blocks:
+            return 0, 0, []
+        lo = blocks[0]["xenia_guest"]
+        hi = blocks[-1]["xenia_guest"] + (blocks[-1]["next"] - blocks[-1]["addr"])
+
+        hits = aligned = 0
+        samples = []
+        guest = lo
+        while guest < hi and hits < limit:
+            data = self._read_raw(base + guest, min(0x100000, hi - guest))
+            if not data:
+                guest += 0x10000
+                continue
+            for off in range(0, len(data) - 8, step):
+                if struct.unpack_from(">I", data, off)[0] != guest + off:
+                    continue
+                data_len = struct.unpack_from(">I", data, off + 4)[0]
+                if not (0 < data_len <= XENIA_MEM_SIZE):
+                    continue
+                foot = self._read_raw(base + guest + off + XENIA_BT_HDR_SIZE
+                                      + data_len, 4)
+                if not foot or len(foot) < 4:
+                    continue
+                if struct.unpack_from(">I", foot, 0)[0] != XENIA_BT_FOOTER_MARK:
+                    continue
+                hits += 1
+                if (guest + off) % XENIA_BT_SLAB_STRIDE == 0:
+                    aligned += 1
+                elif len(samples) < 8:
+                    samples.append((guest + off, data_len))
+            guest += len(data)
+        return hits, aligned, samples
 
     def _bt_empty_slab(self, base, guest, stride):
         """An unused 0x10000 slab between live BT nodes."""
@@ -1146,9 +1260,25 @@ class XeniaMemoryReader:
         Returns (sizes, texts, pointers), each a list of (key, count) sorted by
         count descending.
         """
+        return self.survey_blocks(self._walk_heap_bk(desc_guest),
+                                  max_nodes=max_nodes, scan=scan)
+
+    def survey_slab_heap(self, max_nodes=2000, scan=0x80):
+        """survey_blocks() over Tooie's slab heap — its real game-object heap."""
+        blocks = []
+        for b in self._walk_heap_bt():
+            # The slab walker has no xenia_payload; payload sits after the
+            # 0x40-byte header.
+            if b["state"] == HEAP_STATE_USED and b.get("xenia_data_len"):
+                b = dict(b, xenia_payload=b["addr"] + XENIA_BT_HDR_SIZE)
+                blocks.append(b)
+        return self.survey_blocks(blocks, max_nodes=max_nodes, scan=scan)
+
+    def survey_blocks(self, blocks, max_nodes=2000, scan=0x80):
+        """Size / text / pointer survey over any list of walked blocks."""
         sizes, texts, ptrs = {}, {}, {}
 
-        for b in self._walk_heap_bk(desc_guest)[:max_nodes]:
+        for b in blocks[:max_nodes]:
             if b["state"] != HEAP_STATE_USED or not b.get("xenia_payload"):
                 continue
             sizes[b["chunk_size"]] = sizes.get(b["chunk_size"], 0) + 1
@@ -1394,6 +1524,8 @@ class XeniaMemoryReader:
         chosen = self.resolve_bk_heap_descriptor()
         out.append("chosen (game/level heap) = %s"
                    % ("0x%08X" % chosen if chosen else "None"))
+        out.append("")
+        out.append(self.debug_region_chain())
         out.append("")
         out.append(self.debug_memory_accounting())
         return "\n".join(out)
@@ -2004,10 +2136,13 @@ class XeniaMemoryReader:
                        % (d["guest"], d["base"], d["end"], d["size"],
                           d["alignment"]))
 
-        nodes, notes = self.survey_bt_heap()
+        slab_start = self.find_bt_slab_start()
+        nodes, notes = self.survey_bt_heap(start=slab_start)
         out.append("")
-        out.append("slab walk from guest 0x%08X: %d nodes"
-                   % ((XENIA_BT_HEAP_START - XENIA_PHYS_BASE) & 0xFFFFFFFF,
+        out.append("slab walk from guest 0x%08X (hardcoded constant was 0x%08X): "
+                   "%d nodes"
+                   % (slab_start,
+                      (XENIA_BT_HEAP_START - XENIA_PHYS_BASE) & 0xFFFFFFFF,
                       len(nodes)))
         for n in notes:
             out.append("   note: %s" % n)
@@ -2021,9 +2156,19 @@ class XeniaMemoryReader:
         small = sum(1 for n in nodes if n["len"] < 0x1000)
         out.append("   %d nodes span >1 slab, %d nodes are <0x1000 bytes"
                    % (multi, small))
-        if small:
-            out.append("   (many small nodes each burning a 64KB slab would be "
-                       "very odd — suspect the stride)")
+
+        # Is the 0x10000 stride stepping over headers?  Scan finer and see.
+        hits, aligned, samples = self.probe_bt_slab_granularity()
+        out.append("   granularity probe (step 0x100): %d valid headers, "
+                   "%d of them 0x10000-aligned" % (hits, aligned))
+        if hits == aligned:
+            out.append("   -> stride is correct; nothing is being stepped over, "
+                       "so the node count is what the game actually allocates")
+        else:
+            out.append("   -> STRIDE IS TOO COARSE — headers exist off the "
+                       "0x10000 grid:")
+            for guest, data_len in samples:
+                out.append("        0x%08X len=0x%X" % (guest, data_len))
 
         out.append("   first nodes:")
         for n in nodes[:12]:
@@ -2031,6 +2176,8 @@ class XeniaMemoryReader:
                        % (n["guest"], n["len"], n["slots"],
                           n["footer_ok"], n["head"]))
 
+        out.append("")
+        out.append(self.debug_region_chain())
         out.append("")
         out.append(self.debug_memory_accounting())
         return "\n".join(out)
@@ -2083,8 +2230,140 @@ class XeniaMemoryReader:
             lines.append("  no block contains it (inside the heap but unwalked)")
             return "\n".join(lines)
 
-        lines.append("  not inside any heap we walk — check the other heaps "
-                     "via the Heap dropdown, or it is not heap memory")
+        # The slab heap and the region chain hold most of Tooie's memory, so a
+        # pointer landing outside the FFEEFFEE heaps is the common case, not an
+        # error — searching only those was why this used to give up here.
+        for b in self._walk_heap_bt():
+            lo = b["xenia_guest"]
+            hi = lo + (b["next"] - b["addr"])
+            if lo <= guest < hi:
+                payload = lo + XENIA_BT_HDR_SIZE
+                lines.append("  inside the SLAB heap")
+                lines.append("  slab 0x%08X span 0x%X data_len 0x%X"
+                             % (lo, hi - lo, b.get("xenia_data_len", 0)))
+                if guest == payload:
+                    lines.append("  == payload start")
+                else:
+                    lines.append("  payload starts 0x%08X — pointer is +0x%X "
+                                 "into it, so this is an object POOLED inside "
+                                 "the slab rather than its own allocation"
+                                 % (payload, guest - payload))
+                return "\n".join(lines)
+
+        for rbase, rsize, _nxt, _prev in self.walk_region_chain():
+            if rbase <= guest < rbase + rsize:
+                lines.append("  inside REGION 0x%08X (0x%X bytes), +0x%X in"
+                             % (rbase, rsize, guest - rbase))
+                lines.append("  regions have no node headers, so there is no "
+                             "block structure to report here")
+                return "\n".join(lines)
+
+        lines.append("  not inside any heap, slab or region we know of — "
+                     "check the memory accounting for unexplained runs")
+        return "\n".join(lines)
+
+    # Region header, for the chain rooted in the allocator root block.  These
+    # are NOT FFEEFFEE heaps — they carry no descriptor and no magic, which is
+    # why sweeping for the magic never found them.
+    REGION_NEXT_OFF = 0x00
+    REGION_PREV_OFF = 0x04
+    REGION_SIZE_OFF = 0x18
+
+    def walk_region_chain(self, start=None, limit=256):
+        """
+        Enumerate the allocator's large memory regions.
+
+        Each region header holds {next, prev, ..., size}, and next == base+size
+        for adjacent regions, so the chain tiles the address space.  Following
+        it explains memory that neither the heap walks nor the magic sweep can
+        see: in Tooie the chain covers tens of MB against ~9MB of heaps.
+
+        Returns [(guest, size, next, prev)] in chain order.
+        """
+        base = (self._bk_host_base if self._bk_host_base is not None
+                else (self._phys_base or XENIA_PHYS_BASE))
+
+        def hdr(guest):
+            data = self._read_raw(base + (guest & 0xFFFFFFFF), 0x20)
+            if not data or len(data) < 0x20:
+                return None
+            return (struct.unpack_from(">I", data, self.REGION_NEXT_OFF)[0],
+                    struct.unpack_from(">I", data, self.REGION_PREV_OFF)[0],
+                    struct.unpack_from(">I", data, self.REGION_SIZE_OFF)[0])
+
+        # Walk backwards to the head first, so the caller gets the whole chain
+        # regardless of which member we happened to start from.
+        cur = start if start is not None else 0x40100000
+        seen = set()
+        while True:
+            h = hdr(cur)
+            if not h or cur in seen:
+                break
+            seen.add(cur)
+            prev = h[1]
+            # The head's prev points into the root block, not at a region.
+            if not prev or prev < XENIA_BK_ROOT_GUEST + 0x1000:
+                break
+            cur = prev
+
+        out, seen = [], set()
+        while cur and cur not in seen and len(out) < limit:
+            seen.add(cur)
+            h = hdr(cur)
+            if not h:
+                break
+            nxt, prev, size = h
+            if not (0 < size <= XENIA_MEM_SIZE):
+                break
+            out.append((cur, size, nxt, prev))
+            cur = nxt
+        return out
+
+    def debug_region_chain(self):
+        """
+        The regions and the FFEEFFEE heaps tile the address space together, so
+        a gap between one region and the next is only suspicious once the heaps
+        sitting in it are accounted for.  The last region's `next` points back
+        at the list head in the root block, which is not a gap at all.
+        """
+        rows = self.walk_region_chain()
+        heaps = []
+        for guest in self.list_bk_heaps():
+            d = self.read_bk_heap_descriptor(guest)
+            if d:
+                heaps.append((d["base"], d["end"]))
+
+        lines = ["region chain: %d regions" % len(rows)]
+        total = 0
+        for guest, size, nxt, prev in rows:
+            total += size
+            end = (guest + size) & 0xFFFFFFFF
+            if nxt == end:
+                note = ""
+            elif nxt < XENIA_BK_ROOT_GUEST + 0x1000:
+                note = "   (circular: back to the list head)"
+            else:
+                filled = sum(hi - lo for lo, hi in heaps if end <= lo and hi <= nxt)
+                note = ("   (gap 0x%X filled by heaps)" % (nxt - end)
+                        if filled == nxt - end
+                        else "   <-- unexplained gap 0x%X" % (nxt - end))
+            lines.append("  0x%08X  size 0x%-9X (%6d KB)  next 0x%08X%s"
+                         % (guest, size, size // 1024, nxt, note))
+        lines.append("  total 0x%X (%d MB)" % (total, total // (1 << 20)))
+
+        # What the regions hold: sample past the header rather than at +0.
+        base = (self._bk_host_base if self._bk_host_base is not None
+                else (self._phys_base or XENIA_PHYS_BASE))
+        for guest, size, _nxt, _prev in rows:
+            data = self._read_raw(base + guest + 0x40, 0x40)
+            if not data:
+                continue
+            lines.append("  content of 0x%08X at +0x40:" % guest)
+            for row in range(0, len(data), 16):
+                chunk = data[row:row + 16]
+                text = "".join(chr(c) if 0x20 <= c <= 0x7E else "." for c in chunk)
+                lines.append("    +%03X  %-47s  %s"
+                             % (0x40 + row, chunk.hex(" "), text))
         return "\n".join(lines)
 
     def debug_memory_accounting(self):
@@ -2098,6 +2377,22 @@ class XeniaMemoryReader:
             lines.append("     0x%08X  0x%-9X (%d KB)" % (guest, size, size // 1024))
         lines.append("  (large unexplained runs are either a heap we have not "
                      "found, or not heap memory at all)")
+
+        # A size alone doesn't say what a region is; its first bytes usually do.
+        base = (self._bk_host_base if self._bk_host_base is not None
+                else (self._phys_base or XENIA_PHYS_BASE))
+        for guest, size in leftovers[:3]:
+            if size < 0x10000:
+                continue
+            lines.append("  head of 0x%08X (0x%X bytes):" % (guest, size))
+            data = self._read_raw(base + guest, 0x60)
+            if not data:
+                lines.append("    unreadable")
+                continue
+            for row in range(0, len(data), 16):
+                chunk = data[row:row + 16]
+                text = "".join(chr(c) if 0x20 <= c <= 0x7E else "." for c in chunk)
+                lines.append("    +%03X  %-47s  %s" % (row, chunk.hex(" "), text))
         return "\n".join(lines)
 
     def heap_summary(self, blocks):
