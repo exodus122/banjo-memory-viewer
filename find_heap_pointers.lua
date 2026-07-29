@@ -137,7 +137,10 @@ end
 -- ARRAY of records with a pointer at a fixed offset, which names a whole
 -- category at once.  Those are the ones worth adding to the tag scan cache.
 --------------------------------------------------------------------------------
-local MIN_RUN     = 3
+-- 2 is deliberate, not sloppy: a double-buffered resource is a two-entry table,
+-- and requiring 3 hid one (0x182674774, which swaps two heap nodes each frame).
+-- Pairs at stride 4 or 8 are common enough to be worth the extra noise.
+local MIN_RUN     = 2
 local MAX_STRIDE  = 0x40
 
 print("")
@@ -167,6 +170,104 @@ while i <= #hits do
     i = (count >= MIN_RUN and stride) and (j + 1) or (i + 1)
 end
 if tables_found == 0 then print("  none") end
+
+--------------------------------------------------------------------------------
+-- Sparse tables.
+--
+-- The dense pass above breaks at the first slot that isn't a live pointer, so a
+-- table with NULL or stale entries is reported as several short runs -- or
+-- missed entirely.  Banjo-Tooie on N64 keeps its bone transforms in a 340-entry
+-- table (D_80379E20, stride 8) that is mostly empty at any moment, and that
+-- shape is invisible to a contiguous-run detector.
+--
+-- So: bucket hits by (addr mod stride) and look for clusters whose gaps are
+-- whole multiples of the stride.  A table with 20 live entries out of 340 shows
+-- up as one cluster instead of vanishing.
+--------------------------------------------------------------------------------
+-- Proximity is not structure.  A first cut of this pass reported 38 "tables"
+-- from 254 hits -- the same regions re-grouped under several strides -- because
+-- with stride 4 and a generous gap any two nearby pointers chain together.
+--
+-- The fix is to check the slots we did NOT hit.  In a real table every slot is
+-- either a valid pointer or empty; in a coincidental cluster the space between
+-- hits is ordinary data.  So a candidate only counts if EVERY slot across its
+-- span reads as NULL or as a valid slab/heap pointer.
+local STRIDES  = {0x4, 0x8, 0xC, 0x10, 0x14, 0x18, 0x20}
+local MAX_GAP  = 24        -- empty slots tolerated between live entries
+local MIN_LIVE = 4         -- live entries needed to call it a table
+
+local function slotsLookLikeTable(base, stride, slots)
+    local other = 0
+    for i = 0, slots - 1 do
+        local v = readBE(base + i * stride)
+        if v == nil then return false, -1 end
+        if v ~= 0 and not checkSlab(v) and not checkHeapNode(v) then
+            other = other + 1
+            if other > 0 then return false, other end   -- strict: zero tolerance
+        end
+    end
+    return true, other
+end
+
+print("")
+print("Sparse tables (constant stride, NULL slots allowed):")
+local sparse_found = 0
+local reported = {}
+
+-- A region densely packed with pointers validates at EVERY stride that divides
+-- it, so one array gets reported two or three times at coarser strides (seen:
+-- 0x182698E70 as stride 8/0x10/0x18 over the same bytes).  STRIDES is ascending,
+-- so report the smallest stride that explains a span and suppress anything that
+-- merely re-describes bytes already covered.
+local covered = {}      -- {lo, hi} spans already reported
+local function overlapsCovered(lo, hi)
+    for _, c in ipairs(covered) do
+        if lo < c[2] and hi > c[1] then return true end
+    end
+    return false
+end
+
+for _, stride in ipairs(STRIDES) do
+    local buckets = {}
+    for _, h in ipairs(hits) do
+        local key = h.addr % stride
+        buckets[key] = buckets[key] or {}
+        table.insert(buckets[key], h)
+    end
+    for _, list in pairs(buckets) do
+        local i = 1
+        while i <= #list do
+            local j = i
+            while j < #list do
+                local gap = list[j+1].addr - list[j].addr
+                if gap % stride ~= 0 or gap > stride * MAX_GAP then break end
+                j = j + 1
+            end
+            local live = j - i + 1
+            if live >= MIN_LIVE then
+                local span  = list[j].addr - list[i].addr
+                local slots = span // stride + 1
+                -- Only interesting if it is genuinely sparse; dense runs are
+                -- already covered by the pass above.
+                local lo, hi = list[i].addr, list[j].addr + stride
+                if slots > live and not reported[list[i].addr]
+                        and not overlapsCovered(lo, hi) then
+                    local ok = slotsLookLikeTable(list[i].addr, stride, slots)
+                    if ok then
+                        reported[list[i].addr] = true
+                        covered[#covered+1] = {lo, hi}
+                        sparse_found = sparse_found + 1
+                        print(string.format(
+                            "  %09X  stride 0x%-3X  %3d live / %3d slots  first -> %08X",
+                            list[i].addr, stride, live, slots, list[i].target))
+                    end
+                end
+            end
+            i = (live >= MIN_LIVE) and (j + 1) or (i + 1)
+        end
+    end
+end
+if sparse_found == 0 then print("  none") end
 
 if #misses > 0 then
     print("")

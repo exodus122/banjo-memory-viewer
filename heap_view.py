@@ -2039,7 +2039,44 @@ class HeapView(tk.Frame):
             (0x1826A29A0, "Player Object",            "Player Object",             ""),
             (0x1826A2BCC, "ActorArray",               "Actor Array",               ""),
         ]
-        
+
+        # Arrays of records with a pointer at offset 0, found by
+        # find_heap_pointers.lua (its "Pointer tables" summary).  One entry here
+        # names a whole category, where POINTER_TAGS names a single object.
+        #
+        # (base_host, stride, count, type, label_prefix)
+        #
+        # These are LIVE pointers — several flip between frames.  Two confirmed
+        # double buffers show up here: 0x18266EC68 tracks three slab pairs
+        # (0x120000/0x170000, 0x1C0000/0x1E0000, 0x200000/0x210000, each pair
+        # identically sized), and 0x182674774 swaps two heap nodes with each
+        # other.  A tag that alternates between two blocks of the same size is
+        # the data being honest, not the tag being wrong.
+        POINTER_TABLES = [
+            (0x182674ACC, 0x0C, 36, "ASSET_TABLE","assets"),
+            (0x182674888, 0x04, 25, "PtrArray",   "ptr"),
+            (0x182699960, 0x18, 20, "BufTable",   "buf"),
+            # One stride-8 array of 25 slots, not the three separate tables it
+            # first looked like — the dense scan split it wherever a slot was
+            # NULL.  The sparse pass showed 23 live across 25 contiguous slots.
+            (0x182698E70, 0x08, 25, "ObjTable",   "obj"),
+            (0x182648188, 0x04,  6, "HeapPtrs",   "hp"),
+            (0x1826439E8, 0x1C,  5, "RecTable",   "rec"),
+            (0x182675138, 0x04,  4, "HeapPtrs2",  "hp2"),
+            (0x182674910, 0x04,  4, "SlabPtrs",   "sp"),
+            (0x182699940, 0x04,  4, "BufPtrs",    "bp"),
+            (0x18266EC68, 0x04,  3, "ActiveBuf",  "activebuf"),
+            (0x182674774, 0x04,  2, "ActiveHeap", "activeheap"),
+            (0x182672D34, 0x08,  3, "HeapPtrs3",  "hp3"),
+            (0x182673900, 0x08,  3, "MixPtrs",    "mix"),
+            (0x1826748F0, 0x04,  3, "SlabPtrs2",  "sp2"),
+            (0x182674900, 0x04,  3, "SlabPtrs3",  "sp3"),
+            (0x18269B8C0, 0x04,  3, "OtherPtrs",  "other"),
+            (0x18269B928, 0x04,  3, "OtherPtrs2", "other2"),
+            (0x18269BDE0, 0x04,  3, "OtherPtrs3", "ot3"),
+            (0x18269BE78, 0x08,  3, "HeapPtrs4",  "hp4"),
+        ]
+
         try:
             # ── POINTER_TAGS ─────────────────────────────────────────────
             for ptr_addr, btype, label, source in POINTER_TAGS:
@@ -2048,12 +2085,20 @@ class HeapView(tk.Frame):
                     continue
                 ptr = raw + 0x100000000
                 cache.append((ptr, btype, label, source))
-            
-            
+
+            # ── POINTER_TABLES ───────────────────────────────────────────
+            for base, stride, count, btype, prefix in POINTER_TABLES:
+                for i in range(count):
+                    raw = read32(base + i * stride)
+                    if not raw:
+                        continue
+                    cache.append((raw + 0x100000000, btype,
+                                  "%s[%d]" % (prefix, i),
+                                  "0x%X" % (base + i * stride)))
+
         except Exception as e:
             print(e)
-        
-        #print(cache)
+
         return cache
         
     def _build_bk_xenia_tag_scan_cache(self, reader):
@@ -2147,10 +2192,10 @@ class HeapView(tk.Frame):
                 elif block["chunk_size"] == 0x1110:
                     return "BoneTransformList", f"", ""
             elif self._profile.id == "xenia_bt":
-                if block["used_size"] == 0xEF0:
-                    return "Actor related array?", f"", ""
-                elif block["used_size"] == 0x1110:
-                    return "BoneTransformList", f"", ""
+                #if block["used_size"] == 0xEF0:
+                #    return "Actor related array?", f"", ""
+                if block["used_size"] == 0x1110:
+                    return "BoneTransformList?", f"", ""
 
         except Exception as e:
             import traceback
