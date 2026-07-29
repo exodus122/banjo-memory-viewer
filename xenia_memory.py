@@ -680,7 +680,10 @@ class XeniaMemoryReader:
                         % (role, d["guest"], d["size"] // 1024)))
 
         if self.profile.id == "xenia_bt":
-            out.append((self.SLAB_HEAP_KEY, "Slab  guest 0x70000  (assets)"))
+            # First, and the default (see default_heap_key): Tooie's assets and
+            # its actor array live here, so it is what you almost always want
+            # open.  The allocator heaps stay available below it.
+            out.insert(0, (self.SLAB_HEAP_KEY, "Assets Slab  0x70000  "))
 
         if len(out) > 1:
             out.append((self.ALL_HEAPS_KEY, "All heaps"))
@@ -695,9 +698,22 @@ class XeniaMemoryReader:
     def get_heap_selection(self):
         return self._heap_selection
 
+    def default_heap_key(self):
+        """
+        Which heap to show when the user hasn't chosen one.
+
+        Tooie defaults to the slab heap (assets and the actor array); Kazooie
+        to its game/level heap.  The UI reads this too, so the dropdown always
+        shows the heap actually being walked rather than assuming index 0.
+        """
+        if self.profile.id == "xenia_bt":
+            return self.SLAB_HEAP_KEY
+        guest = self.resolve_bk_heap_descriptor()
+        return ("0x%08X" % guest) if guest is not None else None
+
     def _walk_heap_selected(self):
-        """Walk whichever heap the UI has selected; default is the game heap."""
-        sel = self._heap_selection
+        """Walk whichever heap the UI has selected, else the profile default."""
+        sel = self._heap_selection or self.default_heap_key()
 
         if sel == self.SLAB_HEAP_KEY:
             return self._walk_heap_bt()

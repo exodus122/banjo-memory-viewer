@@ -187,8 +187,6 @@ COLS = [
     ("ModelID",     "ModelID",    62,  "center", False),
     ("ModelName",   "ModelName",  200, "w",      False),
     ("State",       "State",      44,  "center", False),
-    ("Init",        "Init",       38,  "center", False),
-    ("Despawned",   "Despawned",  80,  "center", False),
     ("PosX",        "Pos X",      80,  "center", False),
     ("PosY",        "Pos Y",      80,  "center", False),
     ("PosZ",        "Pos Z",      80,  "center", False),
@@ -798,14 +796,11 @@ class ActorsView(tk.Frame):
         tb = tk.Frame(self, bg=C_PANEL)
         tb.pack(fill=tk.X, padx=8, pady=(0, 2))
 
-        # Live / All toggle
-        self._show_all_var = tk.BooleanVar(value=False)
-        tk.Checkbutton(tb, text="Show despawned slots",
-                       variable=self._show_all_var,
-                       font=FONT, fg=C_TEXT, bg=C_PANEL,
-                       selectcolor=C_BG, activebackground=C_PANEL,
-                       activeforeground=C_TEXT,
-                       command=self._on_filter_change).pack(side=tk.LEFT, padx=(0, 8))
+        # Every slot is always shown.  The init/despawned flags this used to
+        # filter on are not reliably located in every profile, so hiding rows
+        # based on them risked hiding real actors.  Kept as an always-true var
+        # so the existing filter expressions still read naturally.
+        self._show_all_var = tk.BooleanVar(value=True)
 
         tk.Label(tb, text="Filter:", font=FONT, fg=C_DIM,
                  bg=C_PANEL).pack(side=tk.LEFT, padx=(8, 2))
@@ -894,7 +889,7 @@ class ActorsView(tk.Frame):
                                  font=FONT, bd=0, relief=tk.FLAT)
         # Column indices match COL_IDS order:
         # 0=#  1=Addr  2=MarkerPtr  3=MarkerID  4=MarkerName  5=ModelID  6=ModelName
-        # 7=State  8=Init  9=Despawned  10=PosX  11=PosY  12=PosZ  13=Yaw  14=Pitch  15=Roll  16=Scale
+        # 7=State  8=PosX  9=PosY  10=PosZ  11=Yaw  12=Pitch  13=Roll  14=Scale
         self._ctx_menu.add_command(label="Copy Addr",        command=lambda: self._copy_col(1))
         self._ctx_menu.add_command(label="Copy Marker Ptr",  command=lambda: self._copy_col(2))
         self._ctx_menu.add_command(label="Copy Marker ID",   command=lambda: self._copy_col(3))
@@ -964,8 +959,6 @@ class ActorsView(tk.Frame):
             f"0x{a['model_id']:04X}",
             model_name,
             str(a["state"]),
-            "Y" if a["initialized"] else "N",
-            "Y" if a["despawned"] else "N",
             f"{a['pos_x']:.1f}",
             f"{a['pos_y']:.1f}",
             f"{a['pos_z']:.1f}",
@@ -992,8 +985,6 @@ class ActorsView(tk.Frame):
                     return BT_ASSETS[mid].get("name", "").lower() if mid in BT_ASSETS else ""
                 return self._asset_enum_names.get(mid, "").lower()
             if col == "State":      return a["state"]
-            if col == "Init":       return a["initialized"]
-            if col == "Despawned":  return a["despawned"]
             if col == "PosX":       return a["pos_x"]
             if col == "PosY":       return a["pos_y"]
             if col == "PosZ":       return a["pos_z"]
@@ -1132,8 +1123,6 @@ class ActorsView(tk.Frame):
         lines.append(("",      "\n"))
         lines.append(("label", "── Flags ─────────────────────────────────────\n"))
         lines.append(("",      f"  state      : {a['state']}\n"))
-        lines.append(("live" if a["despawned"]==False else "dead",
-                               f"  initialized: {'YES' if a['initialized'] else 'NO'}\n"))
         lines.append(("",      "\n"))
         lines.append(("label", "── Transform ─────────────────────────────────\n"))
         lines.append(("",      f"  Position   : ({a['pos_x']:.3f},  {a['pos_y']:.3f},  {a['pos_z']:.3f})\n"))
@@ -1345,7 +1334,7 @@ class ActorsView(tk.Frame):
         visible.sort(key=self._sort_key, reverse=not self._sort_asc)
 
         headers = ["#", "Addr", "MarkerPtr", "MarkerID", "MarkerName",
-                   "ModelID", "ModelName", "State", "Init", "Despawned",
+                   "ModelID", "ModelName", "State",
                    "PosX", "PosY", "PosZ", "Yaw", "Pitch", "Roll", "Scale"]
         try:
             with open(out_path, "w", newline="", encoding="utf-8") as f:

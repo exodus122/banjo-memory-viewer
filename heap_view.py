@@ -525,7 +525,11 @@ class HeapView(tk.Frame):
         if keys != self._heap_keys:
             self._heap_keys = keys
             self._heap_combo.configure(values=labels)
+            # Fall back to the reader's default rather than index 0, so the
+            # dropdown names the heap actually being walked.
             current = reader.get_heap_selection()
+            if current not in keys and hasattr(reader, "default_heap_key"):
+                current = reader.default_heap_key()
             idx = keys.index(current) if current in keys else 0
             self._heap_combo.current(idx)
 
