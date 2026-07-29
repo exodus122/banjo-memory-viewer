@@ -557,6 +557,24 @@ class HeapView(tk.Frame):
     _TAG_SCAN_INTERVAL = 0.25      # seconds
 
     @staticmethod
+    def _bt_asset_name(asset_id):
+        """Name for a Banjo-Tooie asset id, or "" if unknown.
+
+        Animation assets are checked first: BT_ANIM_ASSETS maps id -> name
+        directly, while BT_ASSETS maps id -> {"name": ...}.  Ids can appear in
+        both, and the animation name is the more specific of the two.  Mirrors
+        the lookup actors_view uses for the ModelName column.
+        """
+        name = BT_ANIM_ASSETS.get(asset_id)
+        if name:
+            return name
+        entry = BT_ASSETS.get(asset_id)
+        if isinstance(entry, dict):
+            name = entry.get("name", "")
+            return "" if name == "?" else name
+        return ""
+
+    @staticmethod
     def _xenia_ptr_header_size(ptr_host):
         """
         Which node shape a cached pointer refers to.
@@ -2078,8 +2096,20 @@ class HeapView(tk.Frame):
         # identically sized), and 0x182674774 swaps two heap nodes with each
         # other.  A tag that alternates between two blocks of the same size is
         # the data being honest, not the tag being wrong.
+        # ── Asset cache ──────────────────────────────────────────────────
+        # Two parallel arrays: a u32 pointer per slot at ASSET_PTR_TABLE, and a
+        # u16 asset id per slot at ASSET_ID_TABLE just below it.  Pairing them
+        # gives the same naming the N64 build gets from BT_ASSETS/BT_ANIM_ASSETS,
+        # so this is handled separately from POINTER_TABLES rather than as a
+        # bare pointer array.
+        #
+        # The id table runs right up to the pointer table, so the gap between
+        # the two bounds the slot count — no need to guess where it ends.
+        ASSET_PTR_TABLE = 0x18267488C
+        ASSET_ID_TABLE  = 0x182674782
+        ASSET_COUNT     = (ASSET_PTR_TABLE - ASSET_ID_TABLE) // 2
+
         POINTER_TABLES = [
-            (0x182674888, 0x04, 25, "ASSET_TABLE", "assets"),
             (0x182674ACC, 0x0C, 36, "PtrArray",   "ptr"),
             (0x182699960, 0x18, 20, "BufTable",   "buf"),
             # One stride-8 array of 25 slots, not the three separate tables it
@@ -2111,6 +2141,20 @@ class HeapView(tk.Frame):
                     continue
                 ptr = raw + 0x100000000
                 cache.append((ptr, btype, label, source))
+
+            # ── Asset cache ──────────────────────────────────────────────
+            for i in range(ASSET_COUNT):
+                raw = read32(ASSET_PTR_TABLE + i * 4)
+                if not raw:
+                    continue
+                aid = read16(ASSET_ID_TABLE + i * 2)
+                if aid is None:
+                    continue
+                name = self._bt_asset_name(aid)
+                cache.append((raw + 0x100000000, "assetCache",
+                              "asset 0x%04X %s" % (aid, name) if name
+                              else "asset 0x%04X" % aid,
+                              "assetCache[%d]" % i))
 
             # ── POINTER_TABLES ───────────────────────────────────────────
             for base, stride, count, btype, prefix in POINTER_TABLES:
