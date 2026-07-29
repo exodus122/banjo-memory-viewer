@@ -556,6 +556,22 @@ class HeapView(tk.Frame):
     # is indistinguishable in practice.
     _TAG_SCAN_INTERVAL = 0.25      # seconds
 
+    @staticmethod
+    def _xenia_ptr_header_size(ptr_host):
+        """
+        Which node shape a cached pointer refers to.
+
+        No memory read needed: the pointers all came from scans that already
+        validated their targets, and the two families live in disjoint address
+        ranges.  Slab payloads are node + 0x40 down in low guest memory;
+        allocator-heap pointers were only accepted when the node proved itself
+        as TRACKED, whose payload is P + 0x50.  Untracked nodes (payload
+        P + 0x10) are never the target of one of these tables, so a block of
+        that shape correctly matches nothing.
+        """
+        guest = ptr_host - 0x100000000
+        return 0x40 if guest < 0x01000000 else 0x50
+
     def _rebuild_tag_scan_cache(self, reader):
         pid = self._profile.id if self._profile is not None else ""
         if pid == "xenia_bt":
@@ -567,12 +583,22 @@ class HeapView(tk.Frame):
         else:
             self._tag_scan_cache = self._build_bk_tag_scan_cache(reader)
 
-        # Index by pointer so tag_block is a dict hit instead of a linear scan.
-        # Earlier entries win, matching the old first-match-wins behaviour.
+        # Index by (pointer, header size) so tag_block is a dict hit instead of
+        # a linear scan.  Earlier entries win, matching first-match-wins.
+        #
+        # The header size is part of the key on purpose.  Xenia nodes come in
+        # three shapes whose payloads sit at +0x50 (tracked), +0x10 (untracked)
+        # and +0x40 (slab), so keying on the payload address alone lets ONE
+        # cached pointer match up to three different blocks — a tracked node at
+        # K-0x50 and an untracked one at K-0x10 are only 0x40 apart, which is a
+        # common spacing.  That is what produced the same label on two nodes.
         index = {}
         for ptr, btype, label, source in self._tag_scan_cache:
-            if ptr and ptr not in index:
-                index[ptr] = (btype, label, source)
+            if not ptr:
+                continue
+            key = (ptr, self._xenia_ptr_header_size(ptr))
+            if key not in index:
+                index[key] = (btype, label, source)
         self._tag_scan_index = index
         self._tag_scan_ts = time.time()
         self._tag_scan_pid = pid
@@ -2053,8 +2079,8 @@ class HeapView(tk.Frame):
         # other.  A tag that alternates between two blocks of the same size is
         # the data being honest, not the tag being wrong.
         POINTER_TABLES = [
-            (0x182674ACC, 0x0C, 36, "ASSET_TABLE","assets"),
-            (0x182674888, 0x04, 25, "PtrArray",   "ptr"),
+            (0x182674888, 0x04, 25, "ASSET_TABLE", "assets"),
+            (0x182674ACC, 0x0C, 36, "PtrArray",   "ptr"),
             (0x182699960, 0x18, 20, "BufTable",   "buf"),
             # One stride-8 array of 25 slots, not the three separate tables it
             # first looked like — the dense scan split it wherever a slot was
@@ -2171,7 +2197,11 @@ class HeapView(tk.Frame):
                 header_size = block["xenia_hdr_size"]
             else:
                 header_size = 0x40
-            hit = self._tag_scan_index.get(block["addr"] + header_size)
+            # Keyed on (payload, header size): see _rebuild_tag_scan_cache.
+            # Without the header size in the key, one pointer matches every
+            # block whose payload lands on it under ANY of the three shapes.
+            hit = self._tag_scan_index.get((block["addr"] + header_size,
+                                            header_size))
             if hit is not None:
                 return hit
             
